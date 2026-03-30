@@ -277,11 +277,75 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     pointer-events: none; /* 빈 공간은 지도로 통과 */
     animation: slideUpCard 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; 
 }
-/* 패널 실제 히트 영역(호버로 펼침) — 부모는 pointer-events:none 이므로 반드시 auto */
+/* 패널 실제 히트 영역 — 데스크톱에서 마우스 이탈 시 슬라이드 전체 접힘, 하단 핸들만 표시 */
 .results-panel-hit {
     pointer-events: auto;
     width: 100%;
     max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+}
+.results-panel-slide {
+    overflow-x: hidden;
+    transition: max-height 0.42s cubic-bezier(0.33, 1, 0.68, 1), opacity 0.3s ease, margin 0.35s ease;
+}
+.results-panel-peektab {
+    display: none;
+    width: calc(100% - 32px);
+    max-width: 520px;
+    margin: 0 auto 4px;
+    padding: 12px 16px;
+    border: none;
+    border-radius: 14px 14px 0 0;
+    background: linear-gradient(180deg, #1e293b 0%, #0f172a 100%);
+    color: #e2e8f0;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.4;
+    cursor: pointer;
+    box-shadow: 0 -6px 24px rgba(0, 0, 0, 0.35);
+    border: 2px solid rgba(251, 191, 36, 0.45);
+    border-bottom: none;
+    text-align: center;
+    align-self: center;
+}
+.results-panel-peektab strong { color: #fbbf24; font-weight: 900; }
+.results-panel-peektab-chev {
+    display: inline-block;
+    margin-right: 6px;
+    color: #fbbf24;
+    font-size: 11px;
+    transition: transform 0.35s cubic-bezier(0.33, 1, 0.68, 1);
+}
+.results-panel-hit:hover .results-panel-peektab-chev,
+.results-panel-hit:focus-within .results-panel-peektab-chev {
+    transform: rotate(180deg);
+}
+.results-panel-peektab-text { vertical-align: middle; }
+@media (hover: hover) and (pointer: fine) {
+    .results-panel-peektab {
+        display: block;
+    }
+    .results-panel-hit:not(:hover):not(:focus-within) .results-panel-slide {
+        max-height: 0 !important;
+        min-height: 0;
+        opacity: 0;
+        overflow: hidden;
+        margin: 0 !important;
+        padding: 0 !important;
+        pointer-events: none;
+    }
+    .results-panel-hit:hover .results-panel-slide,
+    .results-panel-hit:focus-within .results-panel-slide {
+        max-height: min(88vh, 920px);
+        opacity: 1;
+        pointer-events: auto;
+        overflow-y: auto;
+        overflow-x: hidden;
+        -webkit-overflow-scrolling: touch;
+    }
 }
 .results-panel-grip {
     display: none;
@@ -339,27 +403,10 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
-    transition: max-height 0.45s cubic-bezier(0.33, 1, 0.68, 1), opacity 0.3s ease, margin 0.35s ease, padding 0.35s ease;
 }
-/* 데스크톱: 기본 접힘 → 호버(또는 포커스) 시 전체 카드 영역 펼침, 지도가 위에서 더 넓게 보임 */
 @media (hover: hover) and (pointer: fine) {
     .results-panel-grip {
         display: flex;
-    }
-    .results-panel-hit:not(:hover):not(:focus-within) .results-panel-body {
-        max-height: 0;
-        min-height: 0;
-        opacity: 0;
-        overflow: hidden;
-        margin-top: 0;
-        padding-top: 0;
-        padding-bottom: 0;
-        pointer-events: none;
-    }
-    .results-panel-hit:hover .results-panel-body,
-    .results-panel-hit:focus-within .results-panel-body {
-        opacity: 1;
-        pointer-events: auto;
     }
 }
 .results-header-actions {
