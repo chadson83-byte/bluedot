@@ -314,6 +314,7 @@ let microSiteMapObjects = [];
 /** 2단계: 1차 Top5 권역 → 건물(후보) 입지 Top5 */
 let stage2MapObjects = [];
 let stage2Data = null;
+let stage2RoadviewWidget = null;
 
 /** 결제 모달 완료 후 실행할 동작: macro=1단계 분석, stage2=2단계 API */
 let pendingAfterPaymentAction = null;
@@ -696,6 +697,141 @@ async function runMicroSiteAnalysis(lat, lng) {
     }
 }
 
+function formatStage2Metric(v) {
+    if (v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v))) return '—';
+    return String(v);
+}
+
+function stage2CardTitleLines(c) {
+    const sr = c.stage2_rank != null ? Number(c.stage2_rank) : 0;
+    const pr = c.parent_rank != null ? Number(c.parent_rank) : null;
+    const pname = (c.parent_region_name || '').trim();
+    const dir = c.offset_dir || '';
+    const om = c.offset_m != null && Number(c.offset_m) > 0 ? `${Math.round(Number(c.offset_m))}m` : '';
+    const parts = [];
+    if (pr != null && !Number.isNaN(pr) && pr > 0) parts.push(`1단계 ${pr}위 권역`);
+    if (pname) parts.push(pname);
+    if (dir && dir !== '중심') parts.push(dir);
+    if (om) parts.push(om);
+    const sub = parts.length ? parts.join(' · ') : '후보 좌표';
+    return { main: `2단계 종합 ${sr}위`, sub };
+}
+
+function closeStage2CandidateModal() {
+    const m = document.getElementById('stage2-candidate-modal');
+    if (m) m.style.display = 'none';
+}
+
+function closeStage2RoadviewModal() {
+    const modal = document.getElementById('stage2-roadview-modal');
+    if (modal) modal.style.display = 'none';
+    const c = document.getElementById('stage2-roadview-container');
+    if (c) c.innerHTML = '';
+    stage2RoadviewWidget = null;
+}
+
+function openStage2RoadviewForCandidate(lat, lng) {
+    const modal = document.getElementById('stage2-roadview-modal');
+    const container = document.getElementById('stage2-roadview-container');
+    if (!modal || !container) return;
+    if (typeof kakao === 'undefined' || !kakao.maps) {
+        alert('지도를 불러온 뒤 다시 시도해 주세요.');
+        return;
+    }
+    container.innerHTML = '';
+    modal.style.display = 'flex';
+    const run = () => {
+        if (!kakao.maps.Roadview || !kakao.maps.RoadviewClient) {
+            container.innerHTML = '<div class="stage2-rv-fallback"><p>로드뷰 API를 사용할 수 없습니다.</p></div>';
+            return;
+        }
+        const pos = new kakao.maps.LatLng(lat, lng);
+        const rv = new kakao.maps.Roadview(container);
+        const rvc = new kakao.maps.RoadviewClient();
+        rvc.getNearestPanoId(pos, 120, (panoId) => {
+            if (panoId === null) {
+                container.innerHTML = '<div class="stage2-rv-fallback"><p>이 위치 근처에 로드뷰 파노라마가 없습니다.</p><p class="stage2-rv-future">건물 3D 형상·실내 뷰는 추후 이 화면에 연동할 예정입니다.</p></div>';
+                return;
+            }
+            rv.setPanoId(panoId, pos);
+            stage2RoadviewWidget = rv;
+        });
+    };
+    if (typeof kakao.maps.load === 'function') {
+        kakao.maps.load(run);
+    } else {
+        run();
+    }
+}
+
+window.openStage2CandidateDetail = function (idx) {
+    const arr = (stage2Data && stage2Data.top_buildings) ? stage2Data.top_buildings : [];
+    const c = arr[idx];
+    if (!c) return;
+    const modal = document.getElementById('stage2-candidate-modal');
+    const body = document.getElementById('stage2-candidate-modal-body');
+    const heading = document.getElementById('stage2-detail-heading');
+    if (!modal || !body) return;
+    window.__stage2DetailIdx = idx;
+    const sc = c.scoring || {};
+    const comp = sc.components || {};
+    const lines = stage2CardTitleLines(c);
+    const gcol = stage2GradeColor(sc.grade);
+    if (heading) heading.textContent = lines.main;
+    const rp = c.region_proxy || {};
+    const locLine = [rp.name, rp.distance_km != null ? `행정동 거리 약 ${Number(rp.distance_km).toFixed(2)}km` : ''].filter(Boolean).join(' · ') || '—';
+    const evalR = c.eval_radius_m != null ? c.eval_radius_m : (stage2Data && stage2Data.eval_radius_m != null ? stage2Data.eval_radius_m : null);
+
+    const rows = [
+        ['기준 베이스', comp.base],
+        ['앵커·상권 가산', comp.anchor_pois],
+        ['경쟁 밀도 감점', comp.competition_penalty],
+        ['거시 상권 프록시', comp.transit_commercial_proxy],
+        ['연령대 프록시', comp.young_cohort_proxy],
+    ];
+    let formulaHtml = '';
+    rows.forEach(([label, val]) => {
+        if (val === undefined || val === null) return;
+        const num = typeof val === 'number' ? val : parseFloat(val);
+        const disp = Number.isFinite(num) ? (num > 0 && !label.includes('감점') ? '+' : '') + String(num) : escHtml2(String(val));
+        formulaHtml += `<div class="stage2-detail-formula-row"><span>${escHtml2(label)}</span><span style="font-weight:800;color:#0f172a;">${disp}</span></div>`;
+    });
+
+    const rationale = c.selection_rationale_ko
+        ? `<div class="stage2-detail-section-title">입지 선정 근거</div><div class="stage2-detail-rationale">${escHtml2(c.selection_rationale_ko)}</div>`
+        : '';
+
+    body.innerHTML = `
+        <div class="stage2-detail-score-pill" style="background:${gcol}18;border:2px solid ${gcol};color:${gcol};">
+            <span style="font-size:22px;">${formatStage2Metric(sc.score)}</span><span style="font-size:14px;">/100</span>
+            <span style="font-size:13px;margin-left:6px;">${escHtml2(sc.grade_label_ko || '')}</span>
+        </div>
+        <p style="margin:0 0 10px;font-size:13px;font-weight:700;color:#475569;line-height:1.5;">${escHtml2(lines.sub)}</p>
+        <p style="margin:0 0 16px;font-size:12px;color:#94a3b8;">좌표 ${Number(c.lat).toFixed(5)}, ${Number(c.lng).toFixed(5)}${evalR != null ? ` · 평가 반경 ${escHtml2(String(evalR))}m` : ''}</p>
+        <div class="stage2-detail-grid">
+            <div class="stage2-detail-cell"><span class="lbl">반경 내 경쟁(추정)</span><span class="val">${formatStage2Metric(c.competitor_count)}곳</span></div>
+            <div class="stage2-detail-cell"><span class="lbl">앵커 프랜차이즈</span><span class="val">${formatStage2Metric(c.anchor_poi_count)}곳</span></div>
+            <div class="stage2-detail-cell" style="grid-column:1/-1;"><span class="lbl">거시 프록시(행정동)</span><span class="val" style="font-size:13px;">${escHtml2(locLine)}</span></div>
+        </div>
+        <div class="stage2-detail-section-title">점수 구성 (화이트박스)</div>
+        <div class="stage2-detail-formula">${formulaHtml || '<span style="color:#64748b;font-weight:600;">세부 구성 정보가 없습니다.</span>'}</div>
+        ${rationale}
+        <div class="stage2-detail-actions no-print">
+            <button type="button" class="btn-map" onclick="window.panToStage2Candidate(window.__stage2DetailIdx); closeStage2CandidateModal();">지도로 이동 · 확대</button>
+            <button type="button" class="btn-rv" onclick="openStage2RoadviewFromDetailIdx()">거리뷰 (실경)</button>
+            <button type="button" class="btn-close2" onclick="closeStage2CandidateModal()">닫기</button>
+        </div>
+    `;
+    modal.style.display = 'flex';
+};
+
+window.openStage2RoadviewFromDetailIdx = function () {
+    const arr = (stage2Data && stage2Data.top_buildings) ? stage2Data.top_buildings : [];
+    const i = window.__stage2DetailIdx;
+    const x = arr[i];
+    if (x) openStage2RoadviewForCandidate(x.lat, x.lng);
+};
+
 function clearStage2Markers() {
     stage2MapObjects.forEach((o) => { try { o.setMap(null); } catch (_) { /* ignore */ } });
     stage2MapObjects = [];
@@ -704,6 +840,8 @@ function clearStage2Markers() {
 function teardownStage2Ui() {
     clearStage2Markers();
     stage2Data = null;
+    closeStage2CandidateModal();
+    closeStage2RoadviewModal();
     const sec = document.getElementById('stage2-report-section');
     const head = document.getElementById('stage2-report-head');
     const cards = document.getElementById('stage2-cards-container');
@@ -717,11 +855,25 @@ function drawStage2Markers(top) {
     clearStage2Markers();
     top.forEach((c, i) => {
         const pos = new kakao.maps.LatLng(c.lat, c.lng);
+        const lines = stage2CardTitleLines(c);
+        const gcol = stage2GradeColor((c.scoring || {}).grade);
+        let subDisp = lines.sub;
+        if (subDisp.length > 38) subDisp = subDisp.slice(0, 36) + '…';
+        const safeMain = escHtml2(lines.main);
+        const safeSub = escHtml2(subDisp);
+        const content = `<div class="stage2-pin-wrap" role="button" tabindex="0" onclick="window.openStage2CandidateDetail(${i})" style="--s2col:${gcol}">
+            <div class="stage2-pin-pulse"></div>
+            <div class="stage2-pin-bubble">
+                <strong>${safeMain}</strong>
+                <span>${safeSub}</span>
+            </div>
+            <div class="stage2-pin-arrow" style="border-top-color:${gcol}"></div>
+        </div>`;
         const ov = new kakao.maps.CustomOverlay({
             position: pos,
-            content: `<div class="stage2-pin" role="button" onclick="window.panToStage2Candidate(${i})"><span>${c.stage2_rank}</span></div>`,
+            content,
             yAnchor: 1,
-            zIndex: 95,
+            zIndex: 96 + i,
         });
         ov.setMap(map);
         stage2MapObjects.push(ov);
@@ -760,37 +912,43 @@ function renderStage2FullReport(payload) {
     head.innerHTML = `
         <div class="stage2-title">2단계 · 건물(후보) 입지 분석지 (Top ${top.length})</div>
         <p class="stage2-note">${meta}</p>
+        <p class="stage2-note" style="margin-top:8px;color:#fef3c7;line-height:1.5;">지도 <b>말풍선 마커</b> 또는 아래 카드를 누르면 <b>후보별 상세 리포트</b>가 열립니다. 상세 화면에서 <b>거리뷰</b>로 실경을 보거나, 이후 <b>3D 건물 형상</b> 뷰를 이어 붙일 예정입니다.</p>
         <p class="stage2-note" style="margin-top:6px;">${escHtml2(payload.disclaimer || '')}</p>`;
     let html = '';
     top.forEach((c, i) => {
         const sc = c.scoring || {};
         const gcol = stage2GradeColor(sc.grade);
+        const lines = stage2CardTitleLines(c);
         const rp = c.region_proxy || {};
         const locLine = [rp.name, rp.distance_km != null ? `행정동 거리 약 ${Number(rp.distance_km).toFixed(2)}km` : ''].filter(Boolean).join(' · ');
         html += `
-        <div class="result-card stage2-building-card" style="border-top-color:${gcol};" onclick="window.panToStage2Candidate(${i})">
+        <div class="result-card stage2-building-card" style="border-top-color:${gcol};" onclick="window.openStage2CandidateDetail(${i})">
             <div class="rc-top">
                 <div class="rc-rank" style="background:${gcol};">${c.stage2_rank}</div>
-                <div class="rc-title" style="font-size:15px;">${escHtml2(c.label_ko || '후보')}</div>
+                <div class="rc-title-col">
+                    <div class="rc-title-main">${escHtml2(lines.main)}</div>
+                    <div class="rc-title-sub">${escHtml2(lines.sub)}</div>
+                </div>
             </div>
             <div class="rc-info-row">
                 <span class="rc-label">미시 입지 점수</span>
-                <span class="rc-value" style="color:${gcol};font-size:18px;">${sc.score != null ? sc.score : '-'}<span style="font-size:12px;font-weight:800;">/100</span> <span style="font-size:12px;color:#64748b;">${escHtml2(sc.grade_label_ko || '')}</span></span>
+                <span class="rc-value" style="color:${gcol};font-size:18px;">${formatStage2Metric(sc.score)}<span style="font-size:12px;font-weight:800;">/100</span> <span style="font-size:12px;color:#64748b;">${escHtml2(sc.grade_label_ko || '')}</span></span>
             </div>
             <div class="rc-info-row">
                 <span class="rc-label">반경 내 경쟁(추정)</span>
-                <span class="rc-value">${c.competitor_count != null ? c.competitor_count : '-'}곳</span>
+                <span class="rc-value">${formatStage2Metric(c.competitor_count)}곳</span>
             </div>
             <div class="rc-info-row">
                 <span class="rc-label">앵커 프랜차이즈</span>
-                <span class="rc-value">${c.anchor_poi_count != null ? c.anchor_poi_count : '-'}곳</span>
+                <span class="rc-value">${formatStage2Metric(c.anchor_poi_count)}곳</span>
             </div>
             <div class="rc-info-row">
                 <span class="rc-label">거시 프록시</span>
-                <span class="rc-value" style="font-size:11px;">${escHtml2(locLine || '-')}</span>
+                <span class="rc-value" style="font-size:11px;">${escHtml2(locLine || '—')}</span>
             </div>
-            ${c.selection_rationale_ko ? `<div class="rc-stage2-rationale"><span class="rc-stage2-rationale-label">선정 이유</span>${escHtml2(c.selection_rationale_ko)}</div>` : ''}
-            <button type="button" class="rc-btn-stage2" onclick="event.stopPropagation(); window.panToStage2Candidate(${i});">지도에서 이 후보 보기</button>
+            ${c.selection_rationale_ko ? `<div class="rc-stage2-rationale"><span class="rc-stage2-rationale-label">선정 요약</span>${escHtml2(c.selection_rationale_ko)}</div>` : ''}
+            <button type="button" class="rc-btn-stage2" onclick="event.stopPropagation(); window.openStage2CandidateDetail(${i});">상세 리포트 보기</button>
+            <button type="button" class="rc-btn" style="margin-top:8px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12px;padding:10px;" onclick="event.stopPropagation(); window.panToStage2Candidate(${i});">지도만 확대</button>
         </div>`;
     });
     cardBox.innerHTML = html;
@@ -806,7 +964,7 @@ window.panToStage2Candidate = function (idx) {
     const c = arr[idx];
     if (!c || !map) return;
     map.panTo(new kakao.maps.LatLng(c.lat, c.lng));
-    if (map.getLevel() > 5) map.setLevel(5);
+    if (map.getLevel() > 4) map.setLevel(4);
 };
 
 async function runStage2BuildingPickActual() {

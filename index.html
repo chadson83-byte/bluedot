@@ -634,10 +634,33 @@
             </div>
         </div>
 
+        <!-- 2단계 후보 상세 리포트 (1단계 정밀 리포트와 유사하게 후보별 확인) -->
+        <div id="stage2-candidate-modal" class="modal-overlay stage2-detail-overlay" style="display: none; z-index: 8500;" role="dialog" aria-modal="true" aria-labelledby="stage2-detail-heading">
+            <div class="stage2-detail-sheet">
+                <div class="stage2-detail-toolbar no-print">
+                    <h2 id="stage2-detail-heading" class="stage2-detail-heading">2단계 후보 상세</h2>
+                    <button type="button" class="stage2-detail-close" onclick="closeStage2CandidateModal()" aria-label="닫기">✕</button>
+                </div>
+                <div id="stage2-candidate-modal-body" class="stage2-detail-body"></div>
+            </div>
+        </div>
+
+        <!-- 카카오 로드뷰 (실경) — 추후 건물 3D 뷰로 확장 예정 -->
+        <div id="stage2-roadview-modal" class="modal-overlay stage2-rv-overlay" style="display: none; z-index: 8600;" role="dialog" aria-modal="true">
+            <div class="stage2-rv-sheet">
+                <div class="stage2-rv-toolbar no-print">
+                    <span class="stage2-rv-title">거리뷰 · 실제 거리 확인</span>
+                    <button type="button" class="stage2-detail-close" onclick="closeStage2RoadviewModal()" aria-label="닫기">✕</button>
+                </div>
+                <p class="stage2-rv-hint">지금은 카카오 로드뷰로 가시적 확인합니다. 향후 이 화면에 <strong>건물 형상 3D</strong>·실내 뷰 연동을 붙일 예정입니다.</p>
+                <div id="stage2-roadview-container" class="stage2-rv-container"></div>
+            </div>
+        </div>
+
     </div>
 
     <script src="auth.js"></script>
-    <script src="app.js?v=ba-stage2-report-cta-1"></script>
+    <script src="app.js?v=ba-stage2-detail-rv-1"></script>
     <script>
         // =========================================================
         // 🚀 1. GPS 기반 내 위치 자동 설정 및 주소 변환 로직
