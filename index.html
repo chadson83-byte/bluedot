@@ -27,9 +27,16 @@
         /* 카카오 개발자 > 내 애플리케이션 > 앱 키 > JavaScript 키 (REST API 키는 지도에 쓰면 안 됨) */
         window.KAKAO_JS_KEY = "a19675c29ae578ea85333417ff7f6fee";
         window.GOOGLE_CLIENT_ID = "";
-        // 배포(Vercel)에서는 vercel.json rewrite로 /api/* 를 백엔드로 프록시합니다.
-        // 로컬: uvicorn 실행 후 브라우저에서 http://127.0.0.1:8000/ 로 여세요(file:// 지양).
-        window.BLUEDOT_API_BASE = "";
+        // Vercel *.vercel.app: 장시간 분석이 프록시(약 60초)에서 끊기므로 Fly에 직접 호출. Fly 앱 URL은 vercel.json·app.js 와 맞출 것.
+        (function () {
+            var h = (typeof location !== 'undefined' && location.hostname) ? location.hostname : '';
+            if (/\.vercel\.app$/i.test(h)) {
+                window.BLUEDOT_API_BASE = 'https://bluedot-backend-autumn-grass-4638.fly.dev';
+            } else {
+                window.BLUEDOT_API_BASE = '';
+            }
+        })();
+        // 로컬: uvicorn 후 http://127.0.0.1:8000/ (auth.js·app.js가 자동 폴백)
         /* 임시: true면 로그인·크레딧 없이 바로 분석 (데모/개발용). 상용 전 false 권장 */
         window.BLUEDOT_SKIP_CREDIT_CHECK = true;
     </script>

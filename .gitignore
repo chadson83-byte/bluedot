@@ -1,3 +1,5 @@
+.vercel/
+
 data/
 *.pbf
 *.csv

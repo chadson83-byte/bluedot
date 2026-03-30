@@ -3,7 +3,9 @@
 // =========================================================
 
 // [0] fetch with timeout + JSON 안전 파싱 (CB-3 대응)
-const FETCH_TIMEOUT_MS = 60000; // 60초
+const FETCH_TIMEOUT_MS = 90000; // 일반 API
+/** 심평원·마스터 병합 등 무거운 분석 — Vercel 프록시/클라이언트 모두 여유 있게 */
+const BLUEDOT_ANALYZE_TIMEOUT_MS = 180000; // 3분
 async function fetchWithTimeout(url, opts = {}) {
     const ctrl = new AbortController();
     const id = setTimeout(() => ctrl.abort(), opts.timeout ?? FETCH_TIMEOUT_MS);
@@ -26,6 +28,9 @@ async function parseJsonSafe(res) {
     }
 }
 
+// Vercel 배포 시 vercel.json 리라이트로 /api 를 넘기면 장시간 분석이 프록시 타임아웃(약 60초)에 걸림 → Fly 직접 호출
+const BLUEDOT_VERCEL_FLY_ORIGIN = 'https://bluedot-backend-autumn-grass-4638.fly.dev';
+
 const BLUEDOT_API_BASE = (() => {
     const w = (typeof window !== 'undefined') ? window : null;
     const explicit = w && typeof w.BLUEDOT_API_BASE === 'string' ? w.BLUEDOT_API_BASE.trim() : '';
@@ -34,10 +39,13 @@ const BLUEDOT_API_BASE = (() => {
     if (w && w.location && w.location.protocol === 'file:') {
         return 'http://127.0.0.1:8000';
     }
-    // 배포에서는 같은 오리진(/api) 사용, 로컬 http는 127.0.0.1:8000 폴백
     if (w && w.location && (w.location.hostname === '127.0.0.1' || w.location.hostname === 'localhost')) {
         return 'http://127.0.0.1:8000';
     }
+    if (w && w.location && /\.vercel\.app$/i.test(w.location.hostname)) {
+        return BLUEDOT_VERCEL_FLY_ORIGIN;
+    }
+    // 그 외 커스텀 도메인 등: 같은 오리진 /api (리버스 프록시가 긴 타임아웃 허용할 때)
     return '';
 })();
 
@@ -717,7 +725,7 @@ async function startAnalysis() {
     const walkMinutes = 10;
     const url = `${BLUEDOT_API_BASE}/api/hospitals?lat=${center.getLat()}&lng=${center.getLng()}&dept=${deptQ}&radius=${radius}&walk_minutes=${walkMinutes}`;
     try {
-        const response = await fetchWithTimeout(url, {});
+        const response = await fetchWithTimeout(url, { timeout: BLUEDOT_ANALYZE_TIMEOUT_MS });
         const data = await parseJsonSafe(response);
         if (!response.ok) {
             alert(bluedotApiErrorMessage(response, data));
@@ -770,7 +778,7 @@ async function submitAISearch() {
     const walkMinutes = 10;
     const url = `${BLUEDOT_API_BASE}/api/ai-search?lat=${center.getLat()}&lng=${center.getLng()}&prompt=${encodeURIComponent(promptInput)}&radius=${radius}&walk_minutes=${walkMinutes}`;
     try {
-        const response = await fetchWithTimeout(url, {});
+        const response = await fetchWithTimeout(url, { timeout: BLUEDOT_ANALYZE_TIMEOUT_MS });
         const data = await parseJsonSafe(response);
         if (!response.ok) {
             alert(bluedotApiErrorMessage(response, data));

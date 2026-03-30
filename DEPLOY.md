@@ -59,8 +59,8 @@ https://<앱이름>.fly.dev/api/health
 3. Root Directory: 저장소 루트
 4. Build Command: 비움, Output Directory: 비움 (또는 기본)
 
-`vercel.json`이 `/api/*` 요청을 Fly 백엔드로 넘깁니다.  
-**Fly 앱 이름이 `bluedot-backend`가 아니면 `vercel.json`의 `destination`을 수정한 뒤 다시 배포하세요.**
+`vercel.json`의 `/api/*` 리라이트는 **짧은 요청·폴백용**입니다. 메인 분석은 브라우저가 **Fly URL로 직접** 호출합니다(`index.html`·`app.js`의 Fly 오리진).  
+Fly 앱 URL을 바꿀 때는 **`vercel.json`·`index.html`(인라인)·`app.js`(`BLUEDOT_VERCEL_FLY_ORIGIN`) 세 곳을 같은 주소로 맞추세요.**
 
 ### 카카오 지도
 
