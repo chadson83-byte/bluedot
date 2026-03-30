@@ -2,8 +2,11 @@ from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import logging
 import random
 import requests
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
 import pandas as pd
 import math
@@ -12,7 +15,7 @@ import jwt
 from datetime import datetime
 import time
 from pydantic import BaseModel
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 # DB & Auth
 import database as db
@@ -31,11 +34,19 @@ from engine.killer_insights import (
     enhance_time_matrix_killer,
 )
 from engine.car_insurance_stats import build_car_insurance_insight_for_region
+from engine.micro_site import (
+    build_micro_site_payload,
+    build_region_candidate_scores,
+    collect_anchor_pois,
+    dedupe_pick_top,
+    enrich_stage2_top_with_rationale,
+)
 from engine.walkable_phase2 import analyze_location, get_walking_polygon, Phase2Config
 from building_analyzer import generate_aging_report
 
 import re
 from engine.address_resolver import resolve_jibun_codes
+from engine.bjdong_mapper import DEFAULT_BJDONG_TXT
 
 app = FastAPI(title="BLUEDOT Backend API - National Flexible Radius Edition")
 
@@ -44,6 +55,9 @@ app = FastAPI(title="BLUEDOT Backend API - National Flexible Radius Edition")
 def api_health():
     """프론트·배포 점검용 — 200이면 API 서버 정상."""
     p2 = _build_phase2_config()
+    bjdong_ok = os.path.isfile(DEFAULT_BJDONG_TXT)
+    bjdong_sz = os.path.getsize(DEFAULT_BJDONG_TXT) if bjdong_ok else 0
+    dg = (os.getenv("DATA_GO_KR_SERVICE_KEY") or os.getenv("BUILDING_HUB_SERVICE_KEY") or "").strip()
     return {
         "ok": True,
         "service": "bluedot",
@@ -52,7 +66,38 @@ def api_health():
             "postgis_walking_polygon": bool(p2.use_pgr_network),
             "fly": bool(os.getenv("FLY_APP_NAME", "").strip()),
         },
+        "building_pipeline": {
+            "bjdong_txt_exists": bjdong_ok,
+            "bjdong_txt_bytes": bjdong_sz,
+            "bjdong_txt_basename": os.path.basename(DEFAULT_BJDONG_TXT),
+            "hira_key_from_env": bool(os.getenv("HIRA_API_KEY", "").strip()),
+            "data_go_building_key_from_env": bool(dg),
+            "kakao_rest_key_from_env": bool(os.getenv("KAKAO_REST_KEY", "").strip()),
+            "juso_key_from_env": bool(
+                (os.getenv("JUSO_CONFM_KEY") or os.getenv("JUSO_ADDR_LINK_KEY") or "").strip()
+            ),
+            "hint": (
+                "로컬에만 파일/키가 있으면 Vercel 화면은 변하지 않습니다. "
+                "Fly 이미지에 법정동 txt가 들어가려면 git 커밋·push 후 fly deploy 하고, "
+                "fly secrets 로 HIRA_API_KEY·DATA_GO_KR_SERVICE_KEY·KAKAO_REST_KEY 를 넣으세요. "
+                "이 객체가 false/0이면 해당 단계가 서버에서 비어 있는 것입니다."
+            ),
+        },
     }
+
+
+@app.on_event("startup")
+def _startup_building_pipeline_warn():
+    if not os.path.isfile(DEFAULT_BJDONG_TXT):
+        logging.warning(
+            "법정동코드 파일 없음 (%s) — regex 폴백만으로는 bjdongCd 매칭이 약합니다.",
+            DEFAULT_BJDONG_TXT,
+        )
+    if not (os.getenv("KAKAO_REST_KEY") or "").strip():
+        logging.warning(
+            "KAKAO_REST_KEY 미설정 — 주소→법정동(b_code) 1순위를 쓰지 않습니다. "
+            "Fly 배포 시 fly secrets set KAKAO_REST_KEY=... 권장.",
+        )
 
 
 # DB 초기화
@@ -70,6 +115,11 @@ app.add_middleware(
 
 # 운영 시에는 환경변수 사용 권장: HIRA_API_KEY
 HIRA_API_KEY = os.getenv("HIRA_API_KEY", "8ee102c5d025b9a9709736175aa0168bac653098ef0f762e797f727d77dc7da9")
+
+
+def _include_car_insurance_insight_for_dept(dept: str) -> bool:
+    """자동차보험 진료건수 지표는 한의원 리포트에만 사용."""
+    return "한의원" in str(dept or "")
 
 
 def _get_current_user_id(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> Optional[int]:
@@ -636,131 +686,322 @@ def get_dummy_hospitals(lat: float, lng: float, radius: int, dept: str, count: i
         dummy_list.append(h)
     return dummy_list
 
+
+def _hira_fetch_hospitals_once(
+    params: dict,
+    dept: str,
+    lat: float,
+    lng: float,
+    *,
+    data_source: str,
+    log_on_error: bool = True,
+) -> Optional[Tuple[list, int]]:
+    """
+    HIRA getHospBasisList 1회 시도. 성공 시 (병원 dict 목록, 전문의 합) / 실패·0건 시 None.
+    """
+    url = "https://apis.data.go.kr/B551182/hospInfoServicev2/getHospBasisList"
+    response = None
+    backoff = (0.2, 0.55, 1.0)
+    for attempt in range(len(backoff) + 1):
+        try:
+            response = requests.get(url, params=params, timeout=14)
+            break
+        except Exception:
+            response = None
+            if attempt < len(backoff):
+                time.sleep(backoff[attempt])
+    if response is None:
+        return None
+    if response.status_code != 200:
+        if log_on_error:
+            logging.warning("HIRA HTTP %s (dept=%s)", response.status_code, dept)
+        return None
+    try:
+        data = response.json()
+    except Exception:
+        return None
+    resp = data.get("response", {})
+    hdr = resp.get("header") or {}
+    if hdr.get("resultCode") != "00":
+        if log_on_error:
+            logging.warning(
+                "HIRA getHospBasisList 비정상: resultCode=%s resultMsg=%s dept=%s clCd=%s",
+                hdr.get("resultCode"),
+                hdr.get("resultMsg"),
+                dept,
+                params.get("clCd"),
+            )
+        return None
+    items_raw = resp.get("body", {}).get("items") or {}
+    if isinstance(items_raw, str):
+        items_raw = {}
+    items = items_raw.get("item") if isinstance(items_raw, dict) else []
+    if items is None or items == "":
+        items = []
+    if isinstance(items, dict):
+        items = [items]
+    if not items:
+        return None
+
+    real_hospitals: list = []
+    total_doctors_in_radius = 0
+    for item in items:
+        doctor_count = int(item.get("drTotCnt", 1))
+        total_doctors_in_radius += doctor_count
+
+        staff_count = None
+        try:
+            pn = item.get("pnursCnt")
+            if pn is not None and pn != "":
+                staff_count = int(float(pn))
+        except Exception:
+            staff_count = None
+
+        estb = str(item.get("estbDd", "")).strip()
+        established_years = 0
+        try:
+            if estb and estb.isdigit() and len(estb) >= 4:
+                established_years = max(0, datetime.now().year - int(estb[:4]))
+        except Exception:
+            established_years = 0
+
+        if doctor_count >= 3:
+            hours_tag = "🕒 365일/야간진료 (대형)"
+        elif doctor_count == 2:
+            hours_tag = "🕒 주 6일/평일야간 (공동개원)"
+        else:
+            hours_tag = "🕒 일반 진료시간 (1인원장)"
+
+        rev_str, detail_label, rev_man = _hospital_revenue_and_detail(
+            doctor_count, int(staff_count or 0), established_years, dept
+        )
+        raw_name = item.get("yadmNm", f"경쟁 {dept}")
+        display_name = _mask_clinic_name(raw_name, dept)
+        fact_tags = _build_fact_tags(doctor_count, hours_tag, dept)
+
+        h = {
+            "id": item.get("ykiho", str(random.randint(1000, 9999))),
+            "name": raw_name,
+            "display_name": display_name,
+            "fact_tags": fact_tags,
+            "lat": float(item.get("YPos", lat)),
+            "lng": float(item.get("XPos", lng)),
+            "doctors": doctor_count,
+            "staff_count": staff_count,
+            "established_years": established_years,
+            "hours": hours_tag,
+            "estimated_revenue": rev_str,
+            "estimated_revenue_man": rev_man,
+            "detail_label": detail_label,
+            "established_date_raw": str(item.get("estbDd", "")).strip() or None,
+            "op_status": "영업중",
+            "address": str(item.get("addr", "")).strip() or None,
+            "sido_cd": str(item.get("sidoCd", "")).strip() or None,
+            "sigungu_cd": str(item.get("sgguCd", "")).strip() or None,
+            "data_source": data_source,
+        }
+        enrich_hospital_killer_fields(h, dept)
+        real_hospitals.append(h)
+    return real_hospitals, total_doctors_in_radius
+
+
+def _normalize_dept_for_hira(dept: str) -> str:
+    s = str(dept or "").strip()
+    if s == "정신과":
+        return "정신건강의학과"
+    return s
+
+
+def _hira_is_distinct_facility_clcd(dept: str) -> bool:
+    """
+    HIRA 종별코드가 양방 의원(31)과 겹치지 않는 진료 체계.
+    이때 '반경 내 전체 기관' 병합이나 clCd=31 단독 폴백을 쓰면 소아·내과 등이 섞인다.
+    """
+    d = _normalize_dept_for_hira(dept)
+    return d in ("한의원", "치과")
+
+
+# 심평원: 동일 좌표·과목에 대한 짧은 호버/중복 호출을 줄여 과호출·429·타임아웃을 완화
+_HIRA_CACHE_LOCK = threading.Lock()
+_HIRA_CACHE: Dict[Tuple[float, float, int, str], Tuple[float, Tuple[list, int]]] = {}
+_HIRA_CACHE_TTL_SEC = 75.0
+_HIRA_CACHE_MAX_KEYS = 320
+
+
+def _hira_cache_key(lat: float, lng: float, radius: int, dept: str) -> Tuple[float, float, int, str]:
+    return (round(float(lat), 3), round(float(lng), 3), int(radius), str(dept))
+
+
+def _copy_hira_tuple(t: Tuple[list, int]) -> Tuple[list, int]:
+    lst, tot = t
+    return [dict(h) for h in lst], int(tot)
+
+
+def _hira_cache_get(key: Tuple[float, float, int, str]) -> Optional[Tuple[list, int]]:
+    now = time.time()
+    with _HIRA_CACHE_LOCK:
+        ent = _HIRA_CACHE.get(key)
+        if not ent:
+            return None
+        ts, val = ent
+        if now - ts > _HIRA_CACHE_TTL_SEC:
+            try:
+                del _HIRA_CACHE[key]
+            except KeyError:
+                pass
+            return None
+        return _copy_hira_tuple(val)
+
+
+def _hira_cache_set(key: Tuple[float, float, int, str], val: Tuple[list, int]) -> None:
+    with _HIRA_CACHE_LOCK:
+        _HIRA_CACHE[key] = (time.time(), val)
+        while len(_HIRA_CACHE) > _HIRA_CACHE_MAX_KEYS:
+            try:
+                del _HIRA_CACHE[next(iter(_HIRA_CACHE))]
+            except (StopIteration, KeyError):
+                break
+
+
+def _merge_hira_hospital_tuples(
+    *parts: Optional[Tuple[list, int]],
+) -> Optional[Tuple[list, int]]:
+    """여러 HIRA 조회 결과를 ykiho 기준으로 합침. 앞쪽(과목 필터) 우선."""
+    seen: set = set()
+    merged: list = []
+    for t in parts:
+        if not t or not t[0]:
+            continue
+        for h in t[0]:
+            hid = str(h.get("id") or "")
+            if hid in seen:
+                continue
+            seen.add(hid)
+            merged.append(h)
+    if not merged:
+        return None
+    total = sum(int(h.get("doctors") or 1) for h in merged)
+    return merged, total
+
+
 def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
-    real_hospitals = []
-    total_doctors_in_radius = 0 
-    
+    """
+    심평원 HIRA: 기본은 과목(또는 종별) 필터 조회 + 반경 완화(무필터) 병합.
+    한의원(clCd=93)·치과(50)는 '무필터' 결과에 양방 의원·병원이 섞이므로 병합·clCd=31 폴백을 쓰지 않는다.
+    그 외 과목은 1차 0건일 때 반경 내 타 기관 병합으로 호버 공백을 줄인다.
+    """
+    dept = _normalize_dept_for_hira(dept)
     if dept == "동물병원":
-        return [], 0 
+        return [], 0
+
+    ck = _hira_cache_key(lat, lng, radius, dept)
+    cached = _hira_cache_get(ck)
+    if cached is not None:
+        return cached
 
     clCd = "31"
-    dgsbjtCd = ""   
-    
+    dgsbjtCd = ""
     if dept == "치과":
         clCd = "50"
     elif dept == "한의원":
         clCd = "93"
-    else: 
-        clCd = "31" 
+    else:
+        clCd = "31"
         dept_codes = {
-            "내과": "01", "피부과": "14", "안과": "12", "정형외과": "05",
-            "소아과": "11", "이비인후과": "13", "산부인과": "10", "정신건강의학과": "03"
+            "내과": "01",
+            "피부과": "14",
+            "안과": "12",
+            "정형외과": "05",
+            "소아과": "11",
+            "이비인후과": "13",
+            "산부인과": "10",
+            "정신건강의학과": "03",
         }
         dgsbjtCd = dept_codes.get(dept, "")
 
-    try:
-        url = "http://apis.data.go.kr/B551182/hospInfoServicev2/getHospBasisList"
-        params = {
-            "ServiceKey": urllib.parse.unquote(HIRA_API_KEY),
-            "xPos": lng,
-            "yPos": lat,
-            "radius": radius * 1000,
-            "numOfRows": 500,
-            "_type": "json"
-        }
-        if clCd != "31":
-            params["clCd"] = clCd
-        if dgsbjtCd:
-            params["dgsbjtCd"] = dgsbjtCd
+    base = {
+        "ServiceKey": urllib.parse.unquote(HIRA_API_KEY),
+        "xPos": lng,
+        "yPos": lat,
+        "radius": radius * 1000,
+        "numOfRows": 500,
+        "_type": "json",
+    }
+    params_primary = dict(base)
+    if clCd != "31":
+        params_primary["clCd"] = clCd
+    if dgsbjtCd:
+        params_primary["dgsbjtCd"] = dgsbjtCd
 
-        # 네트워크 변동 대비: 타임아웃 완화 + 1회 재시도
-        response = None
-        for _try in range(2):
-            try:
-                response = requests.get(url, params=params, timeout=12)
-                break
-            except Exception:
-                response = None
-                time.sleep(0.25)
-        if response is None:
-            raise Exception("HIRA request failed")
-        
-        if response.status_code == 200:
-            data = response.json()
-            resp = data.get("response", {})
-            if resp.get("header", {}).get("resultCode") != "00":
-                return [], 0
-            items_raw = resp.get("body", {}).get("items") or {}
-            if isinstance(items_raw, str):
-                items_raw = {}
-            items = items_raw.get("item") if isinstance(items_raw, dict) else []
-            if items is None or items == "":
-                items = []
-            if isinstance(items, dict):
-                items = [items]
-            for item in items:
-                doctor_count = int(item.get("drTotCnt", 1)) 
-                total_doctors_in_radius += doctor_count
-                
-                # 직원 수: HIRA 필드 기반(없으면 None)
-                staff_count = None
-                try:
-                    pn = item.get("pnursCnt")
-                    if pn is not None and pn != "":
-                        staff_count = int(float(pn))
-                except Exception:
-                    staff_count = None
-                # 개원 연차: HIRA 개설일(estbDd) 기반(없으면 0)
-                estb = str(item.get("estbDd", "")).strip()
-                established_years = 0
-                try:
-                    if estb and estb.isdigit() and len(estb) >= 4:
-                        established_years = max(0, datetime.now().year - int(estb[:4]))
-                except Exception:
-                    established_years = 0
-                
-                if doctor_count >= 3:
-                    hours_tag = "🕒 365일/야간진료 (대형)"
-                elif doctor_count == 2:
-                    hours_tag = "🕒 주 6일/평일야간 (공동개원)"
-                else:
-                    hours_tag = "🕒 일반 진료시간 (1인원장)"
-                
-                # staff_count가 None이면 0으로 취급(추정치 산출)
-                rev_str, detail_label, rev_man = _hospital_revenue_and_detail(doctor_count, int(staff_count or 0), established_years, dept)
-                raw_name = item.get("yadmNm", f"경쟁 {dept}")
-                display_name = _mask_clinic_name(raw_name, dept)
-                fact_tags = _build_fact_tags(doctor_count, hours_tag, dept)
+    primary = None
+    relaxed = None
+    strict_kind = _hira_is_distinct_facility_clcd(dept)
+    if strict_kind:
+        primary = _hira_fetch_hospitals_once(
+            params_primary,
+            dept,
+            lat,
+            lng,
+            data_source="hira",
+            log_on_error=True,
+        )
+    else:
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            fut_p = ex.submit(
+                _hira_fetch_hospitals_once,
+                params_primary,
+                dept,
+                lat,
+                lng,
+                data_source="hira",
+                log_on_error=True,
+            )
+            fut_r = ex.submit(
+                _hira_fetch_hospitals_once,
+                dict(base),
+                dept,
+                lat,
+                lng,
+                data_source="hira_nearby_all_types",
+                log_on_error=False,
+            )
+            primary = fut_p.result()
+            relaxed = fut_r.result()
 
-                h = {
-                    "id": item.get("ykiho", str(random.randint(1000,9999))),
-                    "name": raw_name,
-                    "display_name": display_name,
-                    "fact_tags": fact_tags,
-                    "lat": float(item.get("YPos", lat)),
-                    "lng": float(item.get("XPos", lng)),
-                    "doctors": doctor_count,
-                    "staff_count": staff_count,
-                    "established_years": established_years,
-                    "hours": hours_tag,
-                    "estimated_revenue": rev_str,
-                    "estimated_revenue_man": rev_man,
-                    "detail_label": detail_label,
-                    "established_date_raw": str(item.get("estbDd", "")).strip() or None,
-                    "op_status": "영업중",
-                    "address": str(item.get("addr", "")).strip() or None,
-                    "sido_cd": str(item.get("sidoCd", "")).strip() or None,
-                    "sigungu_cd": str(item.get("sgguCd", "")).strip() or None,
-                }
-                enrich_hospital_killer_fields(h, dept)
-                real_hospitals.append(h)
-            return real_hospitals, total_doctors_in_radius
-        else:
-            raise Exception("HIRA Status Not 200")
-    except Exception as e:
-        import logging
-        logging.warning(f"HIRA API 실패 또는 데이터 없음: {e} — 허위 마커 미표시")
-        return [], 0
+    if strict_kind:
+        merged = primary if (primary and primary[0]) else None
+    else:
+        merged = _merge_hira_hospital_tuples(primary, relaxed)
+    if merged:
+        if not strict_kind and not (primary and primary[0]) and (relaxed and relaxed[0]):
+            logging.info(
+                "HIRA 과목별 0건·병합 시 반경 완화만 사용 (dept=%s, n=%d)",
+                dept,
+                len(merged[0]),
+            )
+        _hira_cache_set(ck, merged)
+        return merged
+
+    if not strict_kind:
+        params_cl31 = dict(base)
+        params_cl31["clCd"] = "31"
+        got31 = _hira_fetch_hospitals_once(
+            params_cl31, dept, lat, lng, data_source="hira_nearby_cl31", log_on_error=False
+        )
+        if got31:
+            logging.info("HIRA clCd=31 단독으로 반경 목록 확보 (dept=%s)", dept)
+            _hira_cache_set(ck, got31)
+            return got31
+
+    dummies = get_dummy_hospitals(lat, lng, radius, dept, 10)
+    for h in dummies:
+        h["data_source"] = "estimate_hira_unreachable"
+    tot = sum(int(h.get("doctors") or 1) for h in dummies)
+    logging.warning(
+        "HIRA 사용 불가·빈 결과 — 추정 경쟁 마커 %d건 반환 (실제 심평원 연동 시 교체됨)",
+        len(dummies),
+    )
+    return dummies, tot
 
 def fetch_demographics_and_revenue(radius: int):
     base_pop = random.randint(25000, 60000) * (radius ** 1.5)
@@ -864,6 +1105,20 @@ def analyze_node(node_name: str, lat: float, lng: float, dept: str, radius: int)
 # =========================================================
 # [2.5] 🔐 로그인 & 마이페이지 API
 # =========================================================
+class MicroSiteStage2Node(BaseModel):
+    lat: float
+    lng: float
+    name: Optional[str] = None
+    rank: Optional[int] = None
+
+
+class MicroSiteStage2Request(BaseModel):
+    """1차 Top5 권역 좌표 → 권역 내 후보 9곳씩 점수화 후 전역 Top5 건물(후보) 입지."""
+    department: str = "한의원"
+    radius_m: int = 400
+    nodes: List[MicroSiteStage2Node]
+
+
 class KakaoAuthRequest(BaseModel):
     access_token: str
 
@@ -1066,6 +1321,80 @@ def get_hospitals_nearby(lat: float, lng: float, dept: str, radius: int = 1):
     return {"hospitals": real_hosps}
 
 
+@app.get("/api/micro-site")
+def api_micro_site(lat: float, lng: float, radius_m: int = 400, dept: str = "한의원"):
+    """
+    미시 입지 MVP: 클릭 지점 반경(m) 내 앵커 프랜차이즈(카카오 키워드) + HIRA 경쟁 + 마스터 CSV 거시 프록시.
+    """
+    radius_m = int(max(100, min(radius_m, 2000)))
+    r_km = max(0.3, min(radius_m / 1000.0, 2.0))
+    comps, _ = fetch_real_hospitals(lat, lng, r_km, dept)
+    master_ctx = None
+    if df_master is not None and not df_master.empty:
+        master_ctx = resolve_nearest_master_context(df_master, lat, lng, radius_km=max(2.0, r_km * 3))
+    return build_micro_site_payload(
+        lat=lat,
+        lng=lng,
+        radius_m=radius_m,
+        dept=dept,
+        competitors=comps or [],
+        kakao_key=KAKAO_REST_KEY or "",
+        master_ctx=master_ctx,
+    )
+
+
+@app.post("/api/micro-site/stage2")
+def api_micro_site_stage2(body: MicroSiteStage2Request):
+    """
+    2단계: 1차에서 뽑은 최대 5개 권역 각각에 대해
+    중심+8방 125m 오프셋 후보(9점)를 두고, 권역 단위 카카오 앵커·HIRA 목록을 재사용해 미시 점수 산출 후 전역 상위 5곳 반환.
+    """
+    if not body.nodes:
+        raise HTTPException(status_code=400, detail="nodes가 비어 있습니다. 1단계 분석 결과를 보내 주세요.")
+    eval_r = int(max(100, min(int(body.radius_m), 1200)))
+    dept = (body.department or "한의원").strip() or "한의원"
+    all_cands: List[Dict[str, Any]] = []
+    nodes_in = list(body.nodes)[:5]
+    for node in nodes_in:
+        lat, lng = float(node.lat), float(node.lng)
+        r_fetch_km = max(0.5, (eval_r + 320) / 1000.0)
+        r_fetch_km = min(r_fetch_km, 3.0)
+        hospitals, _ = fetch_real_hospitals(lat, lng, r_fetch_km, dept)
+        anchor_r = min(2000, max(eval_r * 2 + 320, 720))
+        anchors, _ = collect_anchor_pois(
+            kakao_key=KAKAO_REST_KEY or "",
+            lat=lat,
+            lng=lng,
+            radius_m=anchor_r,
+        )
+        cands = build_region_candidate_scores(
+            center_lat=lat,
+            center_lng=lng,
+            parent_name=str(node.name or "") or "권역",
+            parent_rank=int(node.rank or 0),
+            eval_radius_m=eval_r,
+            anchors=anchors,
+            hospitals=hospitals or [],
+            dept=dept,
+            df_master=df_master,
+            resolve_master_ctx=resolve_nearest_master_context,
+        )
+        all_cands.extend(cands)
+    # 근접 후보도 허용(지도·리스트에서 겹칠 수 있음). 완전 동일 좌표만 소간격으로 배제.
+    top5 = dedupe_pick_top(all_cands, top_k=5, min_sep_m=12.0)
+    enrich_stage2_top_with_rationale(top5)
+    return {
+        "status": "success",
+        "department": dept,
+        "eval_radius_m": eval_r,
+        "regions_used": len(nodes_in),
+        "candidates_evaluated": len(all_cands),
+        "top_buildings": top5,
+        "method": "per_region_9_grid_reuse_anchors_hira",
+        "disclaimer": "건물 폴리곤이 아닌 '후보 좌표' 기준 추정입니다. 현장 확인이 필요합니다.",
+    }
+
+
 @app.get("/api/building-aging")
 def api_building_aging(lat: float, lng: float, dept: str = "한의원", radius_km: float = 1.0, limit: int = 8):
     """
@@ -1074,21 +1403,14 @@ def api_building_aging(lat: float, lng: float, dept: str = "한의원", radius_k
     - 내부적으로 주소 변환(카카오→JUSO→정규식) + 건축물대장 조회(3초 룰) + DB 캐시를 사용.
     """
     real_hosps, _ = fetch_real_hospitals(lat, lng, int(max(1, radius_km)), dept)
-    competitors = []
-    for h in (real_hosps or [])[: max(1, min(int(limit), 20))]:
-        conv = _convert_addr_to_jibun_codes(str(h.get("address") or ""), fallback_sigungu_cd=str(h.get("sigungu_cd") or ""))
-        competitors.append(
-            {
-                "name": h.get("name") or h.get("display_name") or "경쟁기관",
-                "address": h.get("address"),
-                "sigungu_cd": (conv.get("sigungu_cd") or h.get("sigungu_cd") or ""),
-                "bjdong_cd": (conv.get("bjdong_cd") or ""),
-                "bun": (conv.get("bun") or ""),
-                "ji": (conv.get("ji") or ""),
-            }
-        )
-    report = generate_aging_report(competitors, sleep_sec=0.05, max_total_sec=4.0)
+    competitors = _competitors_for_building_aging(real_hosps, limit=limit)
+    # 전용 엔드포인트: HIRA 이후 건축HUB 다건 호출 허용(프론트 타임아웃 90초와 맞춤)
+    report = generate_aging_report(competitors, sleep_sec=0.05, max_total_sec=28.0)
     return {"status": "success", "report": report, "competitor_count": len(real_hosps or [])}
+
+
+# 상위 N개 노드: HIRA 병렬 처리(건물 노후화는 /api/building-aging 에서만).
+_ANALYZE_TOP_NODES_WORKERS = 3
 
 
 @app.get("/api/hospitals")
@@ -1209,8 +1531,8 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
                 df['best_type'] = df.apply(lambda row: "타입A(전통/통증)" if row['score_A'] >= row['score_B'] else "타입B(미용/다이어트)", axis=1)
 
             top_5_df = df.sort_values(by='final_score', ascending=False).head(5)
-            
-            for idx, row in enumerate(top_5_df.to_dict('records')):
+
+            def _work_hospital_row(row: dict) -> Tuple[dict, list]:
                 f_score = float(round(row['final_score'], 1))
                 doc_ratio = float(row['docs_per_10k'])
                 subway = int(row['subway_count'])
@@ -1283,33 +1605,34 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
                     },
                 }
                 real_hosps, _ = fetch_real_hospitals(node_lat, node_lng, 1, dept)
-                all_hospitals.extend(real_hosps)
+                _node["nearby_hospitals"] = real_hosps
                 _node["killer_insights"] = build_node_killer_insights(real_hosps, row, node_lat, node_lng)
-                try:
-                    competitors = _competitors_for_building_aging(real_hosps, limit=5)
-                    _node["building_aging_report"] = generate_aging_report(competitors, sleep_sec=0.05, max_total_sec=4.0)
-                except Exception as _bld_e:
-                    _node["building_aging_report"] = {
-                        "summary": {"competitor_count": len(real_hosps or [])},
-                        "lists": {"no_elevator": [], "low_parking_under_5": [], "data_missing": []},
-                        "insight": f"현재 건물 정보를 불러올 수 없습니다. ({_bld_e})",
-                        "details": [],
-                    }
-                try:
-                    _node["car_insurance_insight"] = build_car_insurance_insight_for_region(
-                        str(row["행정구역(동읍면)별"])
-                    )
-                except Exception as _car_e:
-                    _node["car_insurance_insight"] = {
-                        "ok": False,
-                        "narrative": f"자동차보험 진료건수 모듈 오류: {_car_e}. `pip install openpyxl` 후 서버를 재시작해 주세요.",
-                        "source_file": "data/car2024.xlsx",
-                    }
+                # 건물 노후화는 HIRA·건축HUB 다건이라 메인 분석을 수 분씩 잡아먹음 → /api/building-aging 로 모달에서만 로드
+                _node["building_aging_report"] = None
+                if _include_car_insurance_insight_for_dept(dept):
+                    try:
+                        _node["car_insurance_insight"] = build_car_insurance_insight_for_region(
+                            str(row["행정구역(동읍면)별"])
+                        )
+                    except Exception as _car_e:
+                        _node["car_insurance_insight"] = {
+                            "ok": False,
+                            "narrative": f"자동차보험 진료건수 모듈 오류: {_car_e}. `pip install openpyxl` 후 서버를 재시작해 주세요.",
+                            "source_file": "data/car2024.xlsx",
+                        }
+                else:
+                    _node["car_insurance_insight"] = None
                 attach_consulting_extensions(
                     _node, row, dept, doc_ratio, estimated_rent_per_pyeong, estimated_spending,
                     status=status, f_score=f_score
                 )
-                analyzed_nodes.append(_node)
+                return _node, real_hosps
+
+            with ThreadPoolExecutor(max_workers=_ANALYZE_TOP_NODES_WORKERS) as _pool_h:
+                _pairs_h = list(_pool_h.map(_work_hospital_row, top_5_df.to_dict("records")))
+            for _node_h, _rh in _pairs_h:
+                all_hospitals.extend(_rh)
+                analyzed_nodes.append(_node_h)
 
             # CSV 데이터가 정상 처리되었으면 즉시 반환!
             ranked_nodes = sorted(analyzed_nodes, key=lambda x: x["score_val"], reverse=True)
@@ -1488,7 +1811,7 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
 
             top_5_df = df.sort_values(by='final_score', ascending=False).head(5)
 
-            for idx, row in enumerate(top_5_df.to_dict('records')):
+            def _work_ai_row(row: dict) -> Tuple[dict, list]:
                 f_score = float(round(row['final_score'], 1))
                 doc_ratio = float(row['docs_per_10k'])
                 subway = int(row['subway_count'])
@@ -1561,33 +1884,33 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                     },
                 }
                 real_hosps, _ = fetch_real_hospitals(node_lat, node_lng, 1, dept_name)
-                all_hospitals.extend(real_hosps)
+                _node["nearby_hospitals"] = real_hosps
                 _node["killer_insights"] = build_node_killer_insights(real_hosps, row, node_lat, node_lng)
-                try:
-                    competitors = _competitors_for_building_aging(real_hosps, limit=5)
-                    _node["building_aging_report"] = generate_aging_report(competitors, sleep_sec=0.05, max_total_sec=4.0)
-                except Exception as _bld_e:
-                    _node["building_aging_report"] = {
-                        "summary": {"competitor_count": len(real_hosps or [])},
-                        "lists": {"no_elevator": [], "low_parking_under_5": [], "data_missing": []},
-                        "insight": f"현재 건물 정보를 불러올 수 없습니다. ({_bld_e})",
-                        "details": [],
-                    }
-                try:
-                    _node["car_insurance_insight"] = build_car_insurance_insight_for_region(
-                        str(row["행정구역(동읍면)별"])
-                    )
-                except Exception as _car_e:
-                    _node["car_insurance_insight"] = {
-                        "ok": False,
-                        "narrative": f"자동차보험 진료건수 모듈 오류: {_car_e}. `pip install openpyxl` 후 서버를 재시작해 주세요.",
-                        "source_file": "data/car2024.xlsx",
-                    }
+                _node["building_aging_report"] = None
+                if _include_car_insurance_insight_for_dept(dept_name):
+                    try:
+                        _node["car_insurance_insight"] = build_car_insurance_insight_for_region(
+                            str(row["행정구역(동읍면)별"])
+                        )
+                    except Exception as _car_e:
+                        _node["car_insurance_insight"] = {
+                            "ok": False,
+                            "narrative": f"자동차보험 진료건수 모듈 오류: {_car_e}. `pip install openpyxl` 후 서버를 재시작해 주세요.",
+                            "source_file": "data/car2024.xlsx",
+                        }
+                else:
+                    _node["car_insurance_insight"] = None
                 attach_consulting_extensions(
                     _node, row, dept_name, doc_ratio, estimated_rent_per_pyeong, estimated_spending,
                     status=status, f_score=f_score
                 )
-                analyzed_nodes.append(_node)
+                return _node, real_hosps
+
+            with ThreadPoolExecutor(max_workers=_ANALYZE_TOP_NODES_WORKERS) as _pool_ai:
+                _pairs_ai = list(_pool_ai.map(_work_ai_row, top_5_df.to_dict("records")))
+            for _node_a, _rha in _pairs_ai:
+                all_hospitals.extend(_rha)
+                analyzed_nodes.append(_node_a)
 
         except Exception as e:
             print(f"🚨 [AI ENGINE CRASH] 에러 발생: {e}")

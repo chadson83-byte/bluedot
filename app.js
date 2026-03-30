@@ -789,11 +789,13 @@ function renderStage2FullReport(payload) {
                 <span class="rc-label">거시 프록시</span>
                 <span class="rc-value" style="font-size:11px;">${escHtml2(locLine || '-')}</span>
             </div>
+            ${c.selection_rationale_ko ? `<div class="rc-stage2-rationale"><span class="rc-stage2-rationale-label">선정 이유</span>${escHtml2(c.selection_rationale_ko)}</div>` : ''}
             <button type="button" class="rc-btn-stage2" onclick="event.stopPropagation(); window.panToStage2Candidate(${i});">지도에서 이 후보 보기</button>
         </div>`;
     });
     cardBox.innerHTML = html;
     sec.style.display = 'block';
+    syncReportStage2Cta();
     try {
         sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
     } catch (_) { /* ignore */ }
@@ -813,6 +815,9 @@ async function runStage2BuildingPickActual() {
         alert('1단계 분석 결과(Top 5 권역)가 없습니다. 먼저 거시 상권 분석을 실행하세요.');
         return;
     }
+    closeReportModal();
+    const rp = document.getElementById('results-panel');
+    if (rp) rp.style.display = 'block';
     const nodes = list.map((rec) => ({
         lat: rec.lat,
         lng: rec.lng,
@@ -969,6 +974,26 @@ async function triggerPaymentFlow() {
     document.getElementById('payment-submit-btn').disabled = true;
     document.getElementById('payment-modal').style.display = 'flex';
 }
+
+function syncReportStage2Cta() {
+    const sec = document.getElementById('report-stage2-section');
+    const btn = document.getElementById('report-stage2-cta-btn');
+    const done = document.getElementById('report-stage2-done');
+    if (!sec) return;
+    const hasMacro = Array.isArray(currentAnalysisData) && currentAnalysisData.length > 0;
+    if (!hasMacro) {
+        sec.style.display = 'none';
+        return;
+    }
+    sec.style.display = 'block';
+    const hasStage2 = stage2Data && Array.isArray(stage2Data.top_buildings) && stage2Data.top_buildings.length > 0;
+    if (btn) btn.style.display = hasStage2 ? 'none' : 'block';
+    if (done) done.style.display = hasStage2 ? 'block' : 'none';
+}
+
+window.triggerStage2PaymentFlowFromReport = function () {
+    triggerStage2PaymentFlow();
+};
 
 /** 2단계: 1단계 결과가 있을 때만. 크레딧/결제는 1단계와 동일(별도 1회 차감). */
 async function triggerStage2PaymentFlow() {
@@ -1203,7 +1228,7 @@ function renderMapAndResults(data, searchRadius) {
         let spendingText = `건당 약 ${(spending / 10000).toFixed(1)}만원`;
 
         cardsHtml += `
-        <div class="result-card" style="border-top: 4px solid ${rec.color};" onclick="panMapToNode(${rec.lat}, ${rec.lng})">
+        <div class="result-card result-card--compact" style="border-top: 4px solid ${rec.color};" onclick="panMapToNode(${rec.lat}, ${rec.lng})">
             <div class="rc-top">
                 <div class="rc-rank" style="background:${rec.color};">${rec.rank}</div>
                 <div class="rc-title" style="font-size:16px;">${rec.name}</div>
@@ -1232,7 +1257,6 @@ function renderMapAndResults(data, searchRadius) {
                 </div>
             </div>
 
-            <button type="button" class="rc-btn-stage2" onclick="event.stopPropagation(); triggerStage2PaymentFlow();">2단계 · 건물 입지 분석지 (추가 결제)</button>
             <button class="rc-btn" onclick="openReportModal(${index}); event.stopPropagation();">정밀 컨설팅 리포트 (수식공개)</button>
         </div>`;
     });
@@ -1767,6 +1791,7 @@ function openReportModal(index) {
     }
     const saveBtn = document.getElementById('report-save-btn');
     if (saveBtn) saveBtn.style.display = (typeof getToken === 'function' && getToken()) ? 'inline-block' : 'none';
+    syncReportStage2Cta();
     modal.style.display = 'flex';
 }
 
@@ -1820,6 +1845,7 @@ window.renderReportFromData = function(data) {
             lastOpenedReportData.building_aging_report = JSON.parse(JSON.stringify(rec.__buildingAgingView));
         } catch (_) { /* keep rec.building_aging_report from spread */ }
     }
+    syncReportStage2Cta();
     document.getElementById('report-modal').style.display = 'flex';
 };
 

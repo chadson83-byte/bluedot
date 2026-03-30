@@ -292,6 +292,13 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     border-radius: 16px;
     box-shadow: 0 10px 20px rgba(0,0,0,0.15);
 }
+.results-panel-body {
+    pointer-events: auto;
+    max-height: min(42vh, 360px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+}
 .results-header-actions {
     display: flex;
     flex-direction: column;
@@ -394,6 +401,39 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     cursor: pointer;
 }
 .rc-btn-stage2:active { transform: scale(0.99); }
+.rc-stage2-rationale {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.55;
+    color: #e2e8f0;
+}
+.rc-stage2-rationale-label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 11px;
+    font-weight: 900;
+    color: #fbbf24;
+    letter-spacing: -0.02em;
+}
+.report-stage2-cta-btn {
+    width: 100%;
+    max-width: 320px;
+    padding: 14px 20px;
+    border: none;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #ea580c, #c2410c);
+    color: white;
+    font-size: 15px;
+    font-weight: 900;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(234, 88, 12, 0.35);
+}
+.report-stage2-cta-btn:active { transform: scale(0.99); }
 .stage2-inner { color: #e2e8f0; font-size: 12px; }
 .stage2-title { font-size: 14px; font-weight: 900; color: #fbbf24; margin-bottom: 8px; }
 .stage2-note { font-size: 10px; color: #94a3b8; line-height: 1.45; margin-bottom: 10px; font-weight: 600; }
@@ -451,6 +491,19 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     min-width: 290px; flex-shrink: 0; scroll-snap-align: start; 
     box-shadow: 0 10px 25px rgba(0,0,0,0.2); border: 2px solid transparent; 
 }
+.results-card-slider--stage1 .result-card--compact {
+    min-width: 268px;
+    padding: 14px 16px;
+    border-radius: 16px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.14);
+}
+.results-card-slider--stage1 .result-card--compact .rc-top { margin-bottom: 10px; }
+.results-card-slider--stage1 .result-card--compact .rc-title { font-size: 14px; }
+.results-card-slider--stage1 .result-card--compact .rc-rank { width: 28px; height: 28px; font-size: 13px; }
+.results-card-slider--stage1 .result-card--compact .rc-info-row { font-size: 12px; margin-bottom: 6px; }
+.results-card-slider--stage1 .result-card--compact .rc-premium-box { padding: 8px 10px; margin-top: 4px; }
+.results-card-slider--stage1 .result-card--compact .premium-item { font-size: 11px; }
+.results-card-slider--stage1 .result-card--compact .rc-btn { margin-top: 10px; padding: 11px; font-size: 13px; }
 .rc-top { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
 .rc-rank { background: var(--text-main); color: white; width: 30px; height: 30px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-weight: 900; font-size: 15px; }
 .rc-title { font-size: 18px; font-weight: 800; color: var(--text-main); letter-spacing: -0.5px; }

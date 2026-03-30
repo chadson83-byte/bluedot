@@ -1,8 +1,14 @@
 .vercel/
 
-data/
+# data 폴더는 기본 무시 — 배포용 엑셀만 추적 허용
+data/*
+!data/
+!data/car2024.xlsx
+!data/TAAS_전국_사고건수_최종마스터.xlsx
+!data/법정동코드 전체자료.txt
 *.pbf
 *.csv
 *.db
 __pycache__/
 .venv/
+node_modules/
