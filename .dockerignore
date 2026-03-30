@@ -17,9 +17,14 @@ agent-transcripts/
 *.osm
 *.osm.bz2
 
-# 공공 xlsx 원본은 용량만 큼. 런타임에 쓰는 것만 예외
-data/*.xlsx
+# data/ 대용량 원본 전부 제외 후, 런타임에 쓰는 소수만 포함 (Fly 빌드 컨텍스트 수백 MB 방지)
+data/**
 !data/car2024.xlsx
+!data/TAAS_전국_사고건수_최종마스터.xlsx
+!data/법정동코드 전체자료.txt
+
+# 마스터 CSV는 v7만 이미지에 포함(v6 로컬 폴백용 중복 제외)
+bluedot_master_v6.csv
 
 bluedot_walking_polygon.html
 docs/
