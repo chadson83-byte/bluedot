@@ -959,12 +959,26 @@ function renderStage2FullReport(payload) {
     } catch (_) { /* ignore */ }
 }
 
+/** 2단계 후보: 도로·횡단보도·건물 블록이 보이도록 최대한 확대 (카카오 레벨 숫자↓ = 배율↑) */
+const BLUEDOT_STAGE2_FOCUS_LEVEL = 2;
+/** 1단계 권역 카드 탭 시 건물 단위에 가깝게 */
+const BLUEDOT_STAGE1_NODE_FOCUS_LEVEL = 3;
+
 window.panToStage2Candidate = function (idx) {
     const arr = (stage2Data && stage2Data.top_buildings) ? stage2Data.top_buildings : [];
     const c = arr[idx];
     if (!c || !map) return;
-    map.panTo(new kakao.maps.LatLng(c.lat, c.lng));
-    if (map.getLevel() > 4) map.setLevel(4);
+    const pos = new kakao.maps.LatLng(c.lat, c.lng);
+    map.panTo(pos);
+    map.setLevel(BLUEDOT_STAGE2_FOCUS_LEVEL);
+    try {
+        map.setCenter(pos);
+    } catch (_) { /* ignore */ }
+    setTimeout(() => {
+        try {
+            if (map && typeof map.relayout === 'function') map.relayout();
+        } catch (_) { /* ignore */ }
+    }, 120);
 };
 
 async function runStage2BuildingPickActual() {
@@ -1431,12 +1445,20 @@ function renderMapAndResults(data, searchRadius) {
 }
 
 window.panMapToNode = function(lat, lng) {
-    if(!map) return;
-    let offset = 0.015; 
-    if(map.getLevel() <= 4) offset = 0.005;
-    else if(map.getLevel() >= 7) offset = 0.03;
+    if (!map) return;
+    let offset = 0.015;
+    if (map.getLevel() <= 4) offset = 0.005;
+    else if (map.getLevel() >= 7) offset = 0.03;
     const moveLatLon = new kakao.maps.LatLng(lat - offset, lng);
     map.panTo(moveLatLon);
+    if (map.getLevel() > BLUEDOT_STAGE1_NODE_FOCUS_LEVEL) {
+        map.setLevel(BLUEDOT_STAGE1_NODE_FOCUS_LEVEL);
+    }
+    setTimeout(() => {
+        try {
+            if (map && typeof map.relayout === 'function') map.relayout();
+        } catch (_) { /* ignore */ }
+    }, 120);
 };
 
 async function startAnalysis() {

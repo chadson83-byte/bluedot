@@ -319,22 +319,28 @@
         </div>
 
         <div id="results-panel" class="results-panel" style="display: none;">
-            <div class="results-header">
-                <div style="flex: 1; min-width: 0;">
-                    <h2 style="color: white; font-size: 20px; font-weight: 800;">1단계 · 상위 추천 상권 (Top 5)</h2>
-                    <div style="color: #10B981; font-size: 11px; font-weight: 600; margin-top: 4px;">✔ 4대 공공데이터 교차 검증 완료</div>
-                    <div style="color: #94a3b8; font-size: 10px; font-weight: 600; margin-top: 6px;">지도 핀·카드로 권역을 확인한 뒤, 정밀 리포트 하단에서 2단계(미시 입지)를 실행할 수 있습니다.</div>
+            <div class="results-panel-hit">
+                <div class="results-header">
+                    <div style="flex: 1; min-width: 0;">
+                        <h2 style="color: white; font-size: 20px; font-weight: 800;">1단계 · 상위 추천 상권 (Top 5)</h2>
+                        <div style="color: #10B981; font-size: 11px; font-weight: 600; margin-top: 4px;">✔ 4대 공공데이터 교차 검증 완료</div>
+                        <div style="color: #94a3b8; font-size: 10px; font-weight: 600; margin-top: 6px;">지도 핀·카드로 권역을 확인한 뒤, 정밀 리포트 하단에서 2단계(미시 입지)를 실행할 수 있습니다.</div>
+                    </div>
+                    <div class="results-header-actions">
+                        <div class="results-close-x" onclick="closeResults()">✕ 닫기</div>
+                    </div>
                 </div>
-                <div class="results-header-actions">
-                    <div class="results-close-x" onclick="closeResults()">✕ 닫기</div>
+                <div class="results-panel-grip no-print" aria-hidden="true">
+                    <span class="results-panel-grip-chev">▲</span>
+                    <span class="results-panel-grip-text">마우스를 올리면 전체 결과 카드가 펼쳐지고, 치우면 접혀 지도가 넓어집니다</span>
                 </div>
-            </div>
-            <div class="results-panel-body">
-                <div id="stage2-report-section" class="stage2-report-section" style="display: none;">
-                    <div id="stage2-report-head" class="stage2-report-head"></div>
-                    <div id="stage2-cards-container" class="results-card-slider stage2-card-slider"></div>
+                <div class="results-panel-body">
+                    <div id="stage2-report-section" class="stage2-report-section" style="display: none;">
+                        <div id="stage2-report-head" class="stage2-report-head"></div>
+                        <div id="stage2-cards-container" class="results-card-slider stage2-card-slider"></div>
+                    </div>
+                    <div class="results-card-slider results-card-slider--stage1" id="results-cards-container"></div>
                 </div>
-                <div class="results-card-slider results-card-slider--stage1" id="results-cards-container"></div>
             </div>
         </div>
 
@@ -660,7 +666,7 @@
     </div>
 
     <script src="auth.js"></script>
-    <script src="app.js?v=ba-stage2-detail-rv-1"></script>
+    <script src="app.js?v=ba-results-hover-zoom-1"></script>
     <script>
         // =========================================================
         // 🚀 1. GPS 기반 내 위치 자동 설정 및 주소 변환 로직

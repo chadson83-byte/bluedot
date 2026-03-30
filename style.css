@@ -274,8 +274,49 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     z-index: 200; 
     background: transparent; /* 까만 배경 삭제 -> 지도가 보임 */
     padding: 0; 
-    pointer-events: none; /* 빈 공간 클릭하면 지도가 움직이게 설정 */
+    pointer-events: none; /* 빈 공간은 지도로 통과 */
     animation: slideUpCard 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; 
+}
+/* 패널 실제 히트 영역(호버로 펼침) — 부모는 pointer-events:none 이므로 반드시 auto */
+.results-panel-hit {
+    pointer-events: auto;
+    width: 100%;
+    max-width: 100%;
+}
+.results-panel-grip {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    margin: 0 20px 6px 20px;
+    padding: 8px 14px;
+    border-radius: 12px;
+    background: rgba(30, 41, 59, 0.88);
+    backdrop-filter: blur(6px);
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    color: #e2e8f0;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: default;
+    user-select: none;
+    transition: background 0.2s, border-color 0.2s;
+}
+.results-panel-hit:hover .results-panel-grip {
+    background: rgba(30, 41, 59, 0.95);
+    border-color: rgba(251, 191, 36, 0.55);
+}
+.results-panel-grip-chev {
+    display: inline-block;
+    font-size: 10px;
+    color: #fbbf24;
+    transition: transform 0.35s cubic-bezier(0.33, 1, 0.68, 1);
+}
+.results-panel-hit:hover .results-panel-grip-chev {
+    transform: rotate(180deg);
+}
+.results-panel-grip-text {
+    text-align: center;
+    line-height: 1.35;
 }
 @keyframes slideUpCard { 
     from { transform: translateY(100%); } 
@@ -294,10 +335,32 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
 }
 .results-panel-body {
     pointer-events: auto;
-    max-height: min(36vh, 300px);
+    max-height: min(62vh, 640px);
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+    transition: max-height 0.45s cubic-bezier(0.33, 1, 0.68, 1), opacity 0.3s ease, margin 0.35s ease, padding 0.35s ease;
+}
+/* 데스크톱: 기본 접힘 → 호버(또는 포커스) 시 전체 카드 영역 펼침, 지도가 위에서 더 넓게 보임 */
+@media (hover: hover) and (pointer: fine) {
+    .results-panel-grip {
+        display: flex;
+    }
+    .results-panel-hit:not(:hover):not(:focus-within) .results-panel-body {
+        max-height: 0;
+        min-height: 0;
+        opacity: 0;
+        overflow: hidden;
+        margin-top: 0;
+        padding-top: 0;
+        padding-bottom: 0;
+        pointer-events: none;
+    }
+    .results-panel-hit:hover .results-panel-body,
+    .results-panel-hit:focus-within .results-panel-body {
+        opacity: 1;
+        pointer-events: auto;
+    }
 }
 .results-header-actions {
     display: flex;
