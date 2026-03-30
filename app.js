@@ -698,7 +698,11 @@ async function runMicroSiteAnalysis(lat, lng) {
 }
 
 function formatStage2Metric(v) {
-    if (v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v))) return '—';
+    if (v === null || v === undefined) return '—';
+    if (typeof v === 'string' && v.trim() === '') return '—';
+    if (typeof v === 'number' && Number.isNaN(v)) return '—';
+    const n = Number(v);
+    if (Number.isFinite(n)) return String(n);
     return String(v);
 }
 
@@ -842,12 +846,17 @@ function teardownStage2Ui() {
     stage2Data = null;
     closeStage2CandidateModal();
     closeStage2RoadviewModal();
+    closeStage2FullscreenCompare();
     const sec = document.getElementById('stage2-report-section');
     const head = document.getElementById('stage2-report-head');
     const cards = document.getElementById('stage2-cards-container');
+    const compareHost = document.getElementById('stage2-compare-table-host');
+    const toolbar = document.getElementById('stage2-toolbar');
     if (sec) sec.style.display = 'none';
     if (head) head.innerHTML = '';
     if (cards) cards.innerHTML = '';
+    if (compareHost) compareHost.innerHTML = '';
+    if (toolbar) toolbar.style.display = 'none';
 }
 
 function drawStage2Markers(top) {
@@ -896,62 +905,100 @@ function stage2GradeColor(grade) {
     return '#64748b';
 }
 
+/** 후보 간 비교 표 (패널·전체화면 공통). light: 흰 배경 모달용 */
+function buildStage2CompareTableHtml(top, payload, options) {
+    const light = options && options.light;
+    const wrapClass = light ? 'stage2-compare-wrap stage2-compare-wrap--light' : 'stage2-compare-wrap';
+    const rows = top.map((c, i) => {
+        const sc = c.scoring || {};
+        const gcol = stage2GradeColor(sc.grade);
+        const lines = stage2CardTitleLines(c);
+        const rp = c.region_proxy || {};
+        const macroFull = [rp.name, rp.distance_km != null ? `약 ${Number(rp.distance_km).toFixed(2)}km` : ''].filter(Boolean).join(' · ');
+        const macroShort = macroFull.length > 28 ? `${macroFull.slice(0, 26)}…` : macroFull;
+        const locTitle = escHtml2(lines.sub);
+        return `
+        <tr class="stage2-compare-tr" data-s2idx="${i}" onclick="window.openStage2CandidateDetail(${i})" title="탭하여 상세 리포트">
+            <td class="s2c-rank"><span class="s2c-badge" style="background:${gcol}">${c.stage2_rank}</span></td>
+            <td class="s2c-loc"><span class="s2c-loc-main">${escHtml2(lines.main)}</span><span class="s2c-loc-sub">${locTitle}</span></td>
+            <td class="s2c-num s2c-score"><strong style="color:${gcol}">${formatStage2Metric(sc.score)}</strong><span class="s2c-denom">/100</span></td>
+            <td class="s2c-grade">${escHtml2(sc.grade_label_ko || '—')}</td>
+            <td class="s2c-num">${formatStage2Metric(c.competitor_count)}</td>
+            <td class="s2c-num">${formatStage2Metric(c.anchor_poi_count)}</td>
+            <td class="s2c-macro" title="${escHtml2(macroFull || '—')}">${escHtml2(macroShort || '—')}</td>
+            <td class="s2c-actions" onclick="event.stopPropagation();">
+                <button type="button" class="s2c-btn" onclick="window.openStage2CandidateDetail(${i})">상세</button>
+                <button type="button" class="s2c-btn s2c-btn-map" onclick="window.panToStage2Candidate(${i})">지도</button>
+            </td>
+        </tr>`;
+    }).join('');
+    const cap = (!options || !options.omitCaption) && payload
+        ? `평가 ${payload.candidates_evaluated || 0}건 → 상위 ${top.length} · 반경 ${payload.eval_radius_m != null ? payload.eval_radius_m : '—'}m · ${escHtml2(payload.department || '')}`
+        : '';
+    return `
+    <div class="${wrapClass}">
+        ${cap ? `<p class="stage2-table-caption">${cap}</p>` : ''}
+        <table class="stage2-compare-table" role="grid">
+            <thead>
+                <tr>
+                    <th scope="col">#</th>
+                    <th scope="col">후보 (1단계 권역·방향)</th>
+                    <th scope="col">미시점수</th>
+                    <th scope="col">등급</th>
+                    <th scope="col">경쟁</th>
+                    <th scope="col">앵커</th>
+                    <th scope="col">거시</th>
+                    <th scope="col">보기</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>
+        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>상세 리포트</b>가 열립니다. 넓은 비교는 상단 <b>전체 화면 비교</b>를 누르세요.</p>'}
+    </div>`;
+}
+
+function closeStage2FullscreenCompare() {
+    const modal = document.getElementById('stage2-fullscreen-modal');
+    if (modal) modal.style.display = 'none';
+    const body = document.getElementById('stage2-fullscreen-body');
+    if (body) body.innerHTML = '';
+}
+
+window.openStage2FullscreenCompare = function () {
+    const top = stage2Data && stage2Data.top_buildings;
+    if (!top || !top.length) return;
+    const modal = document.getElementById('stage2-fullscreen-modal');
+    const body = document.getElementById('stage2-fullscreen-body');
+    if (!modal || !body) return;
+    body.innerHTML = buildStage2CompareTableHtml(top, stage2Data, { light: true, omitFoot: true });
+    modal.style.display = 'flex';
+};
+
 function renderStage2FullReport(payload) {
     const sec = document.getElementById('stage2-report-section');
     const head = document.getElementById('stage2-report-head');
     const cardBox = document.getElementById('stage2-cards-container');
-    if (!sec || !head || !cardBox) return;
+    const compareHost = document.getElementById('stage2-compare-table-host');
+    const toolbar = document.getElementById('stage2-toolbar');
+    if (!sec || !head || !cardBox || !compareHost) return;
     const top = payload.top_buildings || [];
     if (!top.length) {
         sec.style.display = 'block';
         head.innerHTML = '<p class="stage2-err">2단계 후보가 없습니다. API·키·권역 좌표를 확인하세요.</p>';
         cardBox.innerHTML = '';
+        compareHost.innerHTML = '';
+        if (toolbar) toolbar.style.display = 'none';
         return;
     }
     const meta = `후보 ${payload.candidates_evaluated || 0}개 평가 → 상위 ${top.length}곳 · 권역 ${payload.regions_used || '-'}개 · 미시 반경 ${payload.eval_radius_m || '-'}m · ${escHtml2(payload.department || '')}`;
     head.innerHTML = `
-        <div class="stage2-title">2단계 · 건물(후보) 입지 분석지 (Top ${top.length})</div>
+        <div class="stage2-title">2단계 · 후보 비교 (Top ${top.length})</div>
         <p class="stage2-note">${meta}</p>
-        <p class="stage2-note" style="margin-top:8px;color:#fef3c7;line-height:1.5;">지도 <b>말풍선 마커</b> 또는 아래 카드를 누르면 <b>후보별 상세 리포트</b>가 열립니다. 상세 화면에서 <b>거리뷰</b>로 실경을 보거나, 이후 <b>3D 건물 형상</b> 뷰를 이어 붙일 예정입니다.</p>
+        <p class="stage2-note" style="margin-top:8px;color:#fef3c7;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행을 누르면 상세 리포트가 열리고, 지도 말풍선과 연동됩니다.</p>
         <p class="stage2-note" style="margin-top:6px;">${escHtml2(payload.disclaimer || '')}</p>`;
-    let html = '';
-    top.forEach((c, i) => {
-        const sc = c.scoring || {};
-        const gcol = stage2GradeColor(sc.grade);
-        const lines = stage2CardTitleLines(c);
-        const rp = c.region_proxy || {};
-        const locLine = [rp.name, rp.distance_km != null ? `행정동 거리 약 ${Number(rp.distance_km).toFixed(2)}km` : ''].filter(Boolean).join(' · ');
-        html += `
-        <div class="result-card stage2-building-card" style="border-top-color:${gcol};" onclick="window.openStage2CandidateDetail(${i})">
-            <div class="rc-top">
-                <div class="rc-rank" style="background:${gcol};">${c.stage2_rank}</div>
-                <div class="rc-title-col">
-                    <div class="rc-title-main">${escHtml2(lines.main)}</div>
-                    <div class="rc-title-sub">${escHtml2(lines.sub)}</div>
-                </div>
-            </div>
-            <div class="rc-info-row">
-                <span class="rc-label">미시 입지 점수</span>
-                <span class="rc-value" style="color:${gcol};font-size:18px;">${formatStage2Metric(sc.score)}<span style="font-size:12px;font-weight:800;">/100</span> <span style="font-size:12px;color:#64748b;">${escHtml2(sc.grade_label_ko || '')}</span></span>
-            </div>
-            <div class="rc-info-row">
-                <span class="rc-label">반경 내 경쟁(추정)</span>
-                <span class="rc-value">${formatStage2Metric(c.competitor_count)}곳</span>
-            </div>
-            <div class="rc-info-row">
-                <span class="rc-label">앵커 프랜차이즈</span>
-                <span class="rc-value">${formatStage2Metric(c.anchor_poi_count)}곳</span>
-            </div>
-            <div class="rc-info-row">
-                <span class="rc-label">거시 프록시</span>
-                <span class="rc-value" style="font-size:11px;">${escHtml2(locLine || '—')}</span>
-            </div>
-            ${c.selection_rationale_ko ? `<div class="rc-stage2-rationale"><span class="rc-stage2-rationale-label">선정 요약</span>${escHtml2(c.selection_rationale_ko)}</div>` : ''}
-            <button type="button" class="rc-btn-stage2" onclick="event.stopPropagation(); window.openStage2CandidateDetail(${i});">상세 리포트 보기</button>
-            <button type="button" class="rc-btn" style="margin-top:8px;background:#f8fafc;border:1px solid #e2e8f0;font-size:12px;padding:10px;" onclick="event.stopPropagation(); window.panToStage2Candidate(${i});">지도만 확대</button>
-        </div>`;
-    });
-    cardBox.innerHTML = html;
+    compareHost.innerHTML = buildStage2CompareTableHtml(top, payload, { light: false, omitCaption: true });
+    cardBox.innerHTML = '';
+    if (toolbar) toolbar.style.display = 'flex';
     sec.style.display = 'block';
     syncReportStage2Cta();
     try {
@@ -1003,10 +1050,14 @@ async function runStage2BuildingPickActual() {
     const sec = document.getElementById('stage2-report-section');
     const head = document.getElementById('stage2-report-head');
     const cardBox = document.getElementById('stage2-cards-container');
+    const compareHost = document.getElementById('stage2-compare-table-host');
+    const toolbar = document.getElementById('stage2-toolbar');
     if (sec && head) {
         sec.style.display = 'block';
         head.innerHTML = '<p class="stage2-note" style="color:#fef3c7;margin:0;">2단계 분석 중… (최대 1~2분) · 지도에 곧 후보 핀이 표시됩니다.</p>';
         if (cardBox) cardBox.innerHTML = '';
+        if (compareHost) compareHost.innerHTML = '';
+        if (toolbar) toolbar.style.display = 'none';
     }
     try {
         const response = await fetchWithTimeout(url, {

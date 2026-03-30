@@ -330,15 +330,21 @@
                         <div class="results-close-x" onclick="closeResults()">✕ 닫기</div>
                     </div>
                 </div>
+                <div id="stage2-report-section" class="stage2-report-section" style="display: none;">
+                    <div id="stage2-report-head" class="stage2-report-head"></div>
+                    <div id="stage2-toolbar" class="stage2-toolbar no-print" style="display: none;">
+                        <button type="button" class="stage2-fs-btn" onclick="openStage2FullscreenCompare()">전체 화면 비교</button>
+                    </div>
+                    <div class="stage2-compare-scroll">
+                        <div id="stage2-compare-table-host"></div>
+                    </div>
+                    <div id="stage2-cards-container" class="stage2-cards-fallback" style="display: none;" aria-hidden="true"></div>
+                </div>
                 <div class="results-panel-grip no-print" aria-hidden="true">
                     <span class="results-panel-grip-chev">▲</span>
-                    <span class="results-panel-grip-text">마우스를 올리면 전체 결과 카드가 펼쳐지고, 치우면 접혀 지도가 넓어집니다</span>
+                    <span class="results-panel-grip-text">마우스를 올리면 <b>1단계</b> 권역 카드가 펼쳐지고, 치우면 접혀 지도가 넓어집니다 · 2단계 표는 항상 표시</span>
                 </div>
                 <div class="results-panel-body">
-                    <div id="stage2-report-section" class="stage2-report-section" style="display: none;">
-                        <div id="stage2-report-head" class="stage2-report-head"></div>
-                        <div id="stage2-cards-container" class="results-card-slider stage2-card-slider"></div>
-                    </div>
                     <div class="results-card-slider results-card-slider--stage1" id="results-cards-container"></div>
                 </div>
             </div>
@@ -652,6 +658,16 @@
         </div>
 
         <!-- 카카오 로드뷰 (실경) — 추후 건물 3D 뷰로 확장 예정 -->
+        <div id="stage2-fullscreen-modal" class="modal-overlay stage2-fs-overlay" style="display: none; z-index: 8550;" role="dialog" aria-modal="true">
+            <div class="stage2-fs-panel">
+                <div class="stage2-fs-head no-print">
+                    <h2 class="stage2-fs-title">2단계 후보 비교 (전체)</h2>
+                    <button type="button" class="stage2-detail-close" onclick="closeStage2FullscreenCompare()" aria-label="닫기">✕</button>
+                </div>
+                <div id="stage2-fullscreen-body" class="stage2-fs-body"></div>
+            </div>
+        </div>
+
         <div id="stage2-roadview-modal" class="modal-overlay stage2-rv-overlay" style="display: none; z-index: 8600;" role="dialog" aria-modal="true">
             <div class="stage2-rv-sheet">
                 <div class="stage2-rv-toolbar no-print">
@@ -666,7 +682,7 @@
     </div>
 
     <script src="auth.js"></script>
-    <script src="app.js?v=ba-results-hover-zoom-1"></script>
+    <script src="app.js?v=ba-stage2-table-fs-1"></script>
     <script>
         // =========================================================
         // 🚀 1. GPS 기반 내 위치 자동 설정 및 주소 변환 로직
