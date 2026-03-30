@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-미시 입지(MVP): 클릭 지점 반경 내 카카오 키워드 POI + 경쟁(심평원) + 마스터 CSV 거시 프록시.
-횡단보도·주차장은 data_layers 에 플레이스홀더만 반환(2단계).
+미시 입지: 6축 프롭테크 스코어(유동·가시성·배후주거·앵커·메디컬·주차) + 카카오 앵커·심평원·마스터 CSV.
+격자 유동인구·횡단보도·아파트 정문·주차장 등은 프록시/미연동 구간은 scoring_meta.notes 에 명시.
 """
 from __future__ import annotations
 
@@ -99,6 +99,8 @@ def build_region_candidate_scores(
     for la, ln, dist_m, dir_label in candidate_offsets_9(center_lat, center_lng, offset_m=offset_m):
         n_a = _count_anchors_within(la, ln, float(eval_radius_m), anchors)
         n_c = _count_hospitals_within(la, ln, float(eval_radius_m), hospitals)
+        n_a_100 = _count_anchors_within(la, ln, 100.0, anchors)
+        n_c_100 = _count_hospitals_within(la, ln, 100.0, hospitals)
         ctx = None
         if df_master is not None and hasattr(df_master, "empty") and not df_master.empty:
             try:
@@ -107,11 +109,38 @@ def build_region_candidate_scores(
                 ctx = None
         act = ctx.get("activity_index") if ctx else None
         young = ctx.get("young_ratio") if ctx else None
-        sc = score_micro_site(
-            competitor_count=n_c,
-            anchor_poi_count=n_a,
+        row = (ctx.get("row") or {}) if ctx else {}
+        try:
+            rclat = float(row.get("center_lat")) if row.get("center_lat") is not None else None
+            rclng = float(row.get("center_lng")) if row.get("center_lng") is not None else None
+        except (TypeError, ValueError):
+            rclat, rclng = None, None
+        try:
+            mpop = float(row.get("총인구 (명)")) if row.get("총인구 (명)") is not None else None
+        except (TypeError, ValueError):
+            mpop = None
+        if mpop is None:
+            try:
+                mpop = float(row.get("총인구(명)")) if row.get("총인구(명)") is not None else None
+            except (TypeError, ValueError):
+                mpop = None
+        try:
+            bsc = float(row.get("bus_stop_count")) if row.get("bus_stop_count") is not None else None
+        except (TypeError, ValueError):
+            bsc = None
+        sc = score_proptech_clinic_site(
+            lat=la,
+            lng=ln,
+            region_center_lat=rclat,
+            region_center_lng=rclng,
+            offset_dir=dir_label,
+            offset_m=dist_m,
+            anchor_poi_count_100m=n_a_100,
+            medical_facility_count_100m=n_c_100,
             master_activity_index=act,
             young_ratio=young,
+            master_total_pop=mpop,
+            bus_stop_count=bsc,
         )
         pname = (parent_name or "").strip() or "권역"
         pr = int(parent_rank) if parent_rank else 0
@@ -130,6 +159,8 @@ def build_region_candidate_scores(
             "department": dept,
             "competitor_count": n_c,
             "anchor_poi_count": n_a,
+            "anchor_poi_count_100m": n_a_100,
+            "medical_facility_count_100m": n_c_100,
             "scoring": sc,
             "region_proxy": {
                 "name": ctx.get("region_name") if ctx else None,
@@ -142,7 +173,7 @@ def build_region_candidate_scores(
 
 
 def build_stage2_selection_rationale_ko(c: Dict[str, Any]) -> str:
-    """2단계 후보별 선정 이유(휴리스틱 설명). 동일 건물·근접 경쟁 다수도 점수에 이미 반영됨."""
+    """2단계 후보별 선정 이유 — 6축 프롭테크 스코어 기준 요약."""
     sc = c.get("scoring") or {}
     comp = sc.get("components") or {}
     score = sc.get("score")
@@ -153,36 +184,36 @@ def build_stage2_selection_rationale_ko(c: Dict[str, Any]) -> str:
     offset_m = c.get("offset_m")
     n_c = int(c.get("competitor_count") or 0)
     n_a = int(c.get("anchor_poi_count") or 0)
-    ap = float(comp.get("anchor_pois") or 0)
-    tr = float(comp.get("transit_commercial_proxy") or 0)
-    yb = float(comp.get("young_cohort_proxy") or 0)
-    pen = float(comp.get("competition_penalty") or 0)
+    n_a100 = int(c.get("anchor_poi_count_100m") or 0)
+    n_m100 = int(c.get("medical_facility_count_100m") or 0)
+    ft = float(comp.get("foot_traffic") or 0)
+    vis = float(comp.get("visibility_access") or 0)
+    res = float(comp.get("residential_proximity") or 0)
+    anc = float(comp.get("anchor_franchises") or 0)
+    med = float(comp.get("medical_synergy") or 0)
     if offset_dir == "중심" or not offset_m or float(offset_m) <= 0:
         loc = "권역 중심 좌표"
     else:
         loc = f"{offset_dir} 방향 약 {int(offset_m)}m 오프셋 지점"
     head = (
-        f"1단계 {parent_rank}위 권역「{parent_name}」을 기준으로 {loc}을 평가했습니다. "
-        f"미시 반경 내 앵커 프랜차이즈 근접 {n_a}곳, 동일 과목 경쟁 추정 {n_c}곳을 반영했습니다. "
-        "경쟁기관이 인근·동일 건물에 있어도 감점만 반영되며 후보에서 제외하지 않습니다."
+        f"1단계 {parent_rank}위 권역「{parent_name}」의 {loc}을 기준으로 "
+        f"6축 입지 점수(유동·가시성·배후주거·앵커·메디컬시너지·주차)를 산출했습니다. "
+        f"참고: 평가 반경 {int(c.get('eval_radius_m') or 0) or '—'}m 내 앵커 {n_a}곳·동일과목 의원 {n_c}곳, "
+        f"100m 기준 앵커 {n_a100}곳·의료시설(동일과목) {n_m100}곳."
     )
     reasons: List[str] = []
-    if ap >= 12:
-        reasons.append("핵심 상권·앵커 신호가 강해 가산 비중이 큽니다.")
-    elif ap >= 4:
-        reasons.append("주변 앵커 밀도가 무난해 접근성 가산을 받았습니다.")
-    if tr >= 5:
-        reasons.append("행정동 단위 거시 상권 활력(프록시)이 양호합니다.")
-    elif tr >= 2:
-        reasons.append("거시 상권 지표가 일정 수준 이상입니다.")
-    if yb >= 2.5:
-        reasons.append("타겟 연령층(영·청년) 비중 추정이 높아 가점 요인입니다.")
-    if pen <= -18:
-        reasons.append("경쟁 밀도 감점이 크지만 앵커·거시 요인이 이겨 종합 상위에 들었습니다.")
-    elif n_c <= 2:
-        reasons.append("즉시 인지되는 동일 과목 경쟁 밀도는 낮은 편입니다.")
-    mid = " ".join(reasons) if reasons else "앵커·경쟁·거시 프록시의 균형으로 전체 후보 대비 상위 점수입니다."
-    tail = f" (미시 종합 {score}점 / 등급 {grade})"
+    if ft >= 25:
+        reasons.append("유동·상권 활력 프록시가 높은 편입니다.")
+    if vis >= 15:
+        reasons.append("코너·보행 접근성(버스정류장 프록시) 신호가 강합니다.")
+    if res >= 14:
+        reasons.append("행정동 핵심에 가까워 배후 수요 프록시가 유리합니다.")
+    if anc >= 10:
+        reasons.append("핵심 앵커 브랜드 100m 밀집이 뚜렷합니다.")
+    if med >= 7:
+        reasons.append("근접 의료시설(동일·유사 과목)이 다수 있어 메디컬 블록 프록시가 있습니다.")
+    mid = " ".join(reasons) if reasons else "6축 합산으로 전체 후보 대비 상위 점수입니다."
+    tail = f" (종합 {score}점 / 등급 {grade})"
     return head + " " + mid + tail
 
 
@@ -309,10 +340,167 @@ DEFAULT_ANCHOR_BRANDS: List[Tuple[str, str]] = [
     ("스타벅스", "스타벅스"),
     ("파리바게뜨", "파리바게뜨"),
     ("올리브영", "올리브영"),
+    ("다이소", "다이소"),
     ("메가커피", "메가커피"),
     ("이디야", "이디야"),
     ("롯데리아", "롯데리아"),
 ]
+
+
+_CORNER_DIAGONAL = frozenset({"북동", "남동", "남서", "북서"})
+
+
+def score_proptech_clinic_site(
+    *,
+    lat: float,
+    lng: float,
+    region_center_lat: Optional[float],
+    region_center_lng: Optional[float],
+    offset_dir: str,
+    offset_m: float,
+    anchor_poi_count_100m: int,
+    medical_facility_count_100m: int,
+    master_activity_index: Optional[float],
+    young_ratio: Optional[float],
+    master_total_pop: Optional[float],
+    bus_stop_count: Optional[float],
+    has_building_parking: Optional[bool] = None,
+    nearby_public_parking_100m: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """
+    의원·상가 입지 100점 만점 (6축) + S/A/B/C.
+    데이터 공백 구간은 메타 notes에 명시한다.
+    """
+    notes: List[str] = []
+
+    # 1) 유동인구 지수 (max 30) — 마스터 활력·인구로 분위 프록시 (실제 50m 격자 유동인구 아님)
+    ai = float(master_activity_index) if master_activity_index is not None else None
+    pop = float(master_total_pop) if master_total_pop is not None and float(master_total_pop) > 0 else None
+    tier_ft = 0
+    if ai is not None:
+        if ai >= 22:
+            tier_ft = max(tier_ft, 3)
+        elif ai >= 12:
+            tier_ft = max(tier_ft, 2)
+        elif ai >= 4:
+            tier_ft = max(tier_ft, 1)
+    if pop is not None:
+        if pop >= 40000:
+            tier_ft = max(tier_ft, 3)
+        elif pop >= 18000:
+            tier_ft = max(tier_ft, 2)
+        elif pop >= 6000:
+            tier_ft = max(tier_ft, 1)
+    if tier_ft == 0 and ai is None and pop is None:
+        foot = 15.0
+        notes.append("유동인구: 행정동 마스터 부재 → 평균 수준(15점) 가정.")
+    else:
+        foot_map = {0: 5.0, 1: 15.0, 2: 25.0, 3: 30.0}
+        foot = foot_map.get(tier_ft, 15.0)
+        notes.append("유동인구: 실제 격자 유동인구가 아니라 마스터 활력·총인구 기반 분위 프록시입니다.")
+    if young_ratio is not None and float(young_ratio) >= 0.36:
+        foot = min(30.0, foot + 2.0)
+
+    # 2) 가시성·접근 (max 20) — 코너=격자 오프셋 방향 프록시, 횡단보도=버스정류장 밀도 프록시
+    corner = 0.0
+    od = (offset_dir or "중심").strip()
+    om = float(offset_m or 0)
+    if od in _CORNER_DIAGONAL and om > 0:
+        corner = 10.0
+    elif od != "중심" and om > 0:
+        corner = 5.0
+    cross = 0.0
+    bsc = float(bus_stop_count) if bus_stop_count is not None else None
+    if bsc is not None:
+        if bsc >= 14:
+            cross = 10.0
+        elif bsc >= 5:
+            cross = 5.0
+        notes.append("횡단보도: POI 미연동 → 해당 행정동 버스정류장 수로 보행·접근성 프록시.")
+    else:
+        notes.append("횡단보도: 버스정류장 수 없음 → 0점(데이터 공백).")
+    visibility = min(20.0, corner + cross)
+
+    # 3) 배후 주거 (max 20) — 행정동 중심까지 거리 감쇠 (아파트 정문 데이터 없음)
+    residential = 0.0
+    if (
+        region_center_lat is not None
+        and region_center_lng is not None
+        and abs(float(region_center_lat)) <= 90
+        and abs(float(region_center_lng)) <= 180
+    ):
+        d_admin = haversine_m(lat, lng, float(region_center_lat), float(region_center_lng))
+        if d_admin < 300:
+            residential = 20.0 * max(0.0, 1.0 - d_admin / 300.0)
+        notes.append("배후 주거: 아파트 정문 좌표 없음 → 인접 행정동 중심까지 거리 감쇠 프록시.")
+    else:
+        residential = 8.0
+        notes.append("배후 주거: 행정동 중심좌표 없음 → 중립 프록시(8점).")
+
+    # 4) 앵커 (max 15) — 반경 100m
+    na = int(anchor_poi_count_100m)
+    if na >= 3:
+        anchor_pts = 15.0
+    elif na >= 1:
+        anchor_pts = 10.0
+    else:
+        anchor_pts = 0.0
+
+    # 5) 메디컬 시너지 (max 10) — 동일 과목 HIRA 목록 100m (타 진료과·약국은 미포함)
+    nm = int(medical_facility_count_100m)
+    if nm >= 5:
+        med = 10.0
+    elif nm >= 2:
+        med = 7.0
+    else:
+        med = 3.0
+    notes.append("메디컬 시너지: 심평원 동일(유사) 과목만 집계 — 타 과목·약국은 추후 POI로 확장 가능.")
+
+    # 6) 주차 (max 5)
+    park = 0.0
+    if has_building_parking is True:
+        park += 3.0
+    elif has_building_parking is False:
+        pass
+    else:
+        notes.append("건물 주차: 건축물대장/폴리곤 미연동 → 가점 미반영.")
+    if nearby_public_parking_100m is True:
+        park += 2.0
+    elif nearby_public_parking_100m is False:
+        pass
+    else:
+        notes.append("공영·민영 주차: 반경 100m 주차장 POI 미연동 → 가점 미반영.")
+    park = min(5.0, park)
+
+    total = foot + visibility + residential + anchor_pts + med + park
+    total = max(0.0, min(100.0, total))
+
+    if total >= 90:
+        grade, label = "S", "최우수"
+    elif total >= 75:
+        grade, label = "A", "우수"
+    elif total >= 60:
+        grade, label = "B", "보통"
+    else:
+        grade, label = "C", "주의"
+
+    return {
+        "score": round(total, 1),
+        "grade": grade,
+        "grade_label_ko": label,
+        "components": {
+            "foot_traffic": round(foot, 1),
+            "visibility_access": round(visibility, 1),
+            "residential_proximity": round(residential, 1),
+            "anchor_franchises": round(anchor_pts, 1),
+            "medical_synergy": round(med, 1),
+            "parking_infrastructure": round(park, 1),
+        },
+        "scoring_meta": {
+            "method": "proptech_clinic_v1",
+            "notes": notes,
+        },
+    }
 
 
 def collect_anchor_pois(
@@ -357,46 +545,6 @@ def collect_anchor_pois(
     return list(merged.values()), {"errors": meta_errors}
 
 
-def score_micro_site(
-    *,
-    competitor_count: int,
-    anchor_poi_count: int,
-    master_activity_index: Optional[float],
-    young_ratio: Optional[float],
-) -> Dict[str, Any]:
-    base = 52.0
-    anchor_pts = min(22.0, float(anchor_poi_count) * 3.5)
-    penalty = min(28.0, float(competitor_count) * 2.8)
-    transit = 0.0
-    if master_activity_index is not None:
-        transit = min(12.0, max(0.0, float(master_activity_index)) / 4.0)
-    youth_bonus = 0.0
-    if young_ratio is not None:
-        youth_bonus = min(6.0, max(0.0, float(young_ratio)) * 8.0)
-    raw = base + anchor_pts + transit + youth_bonus - penalty
-    score = max(0.0, min(100.0, raw))
-    if score >= 82:
-        grade, label = "S", "우수"
-    elif score >= 68:
-        grade, label = "A", "양호"
-    elif score >= 52:
-        grade, label = "B", "보통"
-    else:
-        grade, label = "C", "주의"
-    return {
-        "score": round(score, 1),
-        "grade": grade,
-        "grade_label_ko": label,
-        "components": {
-            "base": base,
-            "anchor_pois": round(anchor_pts, 1),
-            "competition_penalty": round(-penalty, 1),
-            "transit_commercial_proxy": round(transit, 1),
-            "young_cohort_proxy": round(youth_bonus, 1),
-        },
-    }
-
-
 def build_micro_site_payload(
     *,
     lat: float,
@@ -409,16 +557,46 @@ def build_micro_site_payload(
 ) -> Dict[str, Any]:
     anchor_list, kmeta = collect_anchor_pois(kakao_key=kakao_key, lat=lat, lng=lng, radius_m=radius_m)
     n_comp = len(competitors or [])
+    n_a_100 = _count_anchors_within(lat, lng, 100.0, anchor_list)
+    n_c_100 = _count_hospitals_within(lat, lng, 100.0, competitors or [])
     act = None
     young = None
+    row: Dict[str, Any] = {}
     if master_ctx:
         act = master_ctx.get("activity_index")
         young = master_ctx.get("young_ratio")
-    scoring = score_micro_site(
-        competitor_count=n_comp,
-        anchor_poi_count=len(anchor_list),
+        row = master_ctx.get("row") or {}
+    try:
+        rclat = float(row.get("center_lat")) if row.get("center_lat") is not None else None
+        rclng = float(row.get("center_lng")) if row.get("center_lng") is not None else None
+    except (TypeError, ValueError):
+        rclat, rclng = None, None
+    try:
+        mpop = float(row.get("총인구 (명)")) if row.get("총인구 (명)") is not None else None
+    except (TypeError, ValueError):
+        mpop = None
+    if mpop is None:
+        try:
+            mpop = float(row.get("총인구(명)")) if row.get("총인구(명)") is not None else None
+        except (TypeError, ValueError):
+            mpop = None
+    try:
+        bsc = float(row.get("bus_stop_count")) if row.get("bus_stop_count") is not None else None
+    except (TypeError, ValueError):
+        bsc = None
+    scoring = score_proptech_clinic_site(
+        lat=lat,
+        lng=lng,
+        region_center_lat=rclat,
+        region_center_lng=rclng,
+        offset_dir="중심",
+        offset_m=0.0,
+        anchor_poi_count_100m=n_a_100,
+        medical_facility_count_100m=n_c_100,
         master_activity_index=act,
         young_ratio=young,
+        master_total_pop=mpop,
+        bus_stop_count=bsc,
     )
     comp_out: List[Dict[str, Any]] = []
     for h in (competitors or [])[:40]:
@@ -454,6 +632,8 @@ def build_micro_site_payload(
         },
         "competitors": comp_out,
         "competitor_count": n_comp,
+        "anchor_poi_count_100m": n_a_100,
+        "medical_facility_count_100m": n_c_100,
         "scoring": scoring,
         "narrative": narrative,
         "data_layers": {

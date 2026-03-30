@@ -786,18 +786,27 @@ window.openStage2CandidateDetail = function (idx) {
     const locLine = [rp.name, rp.distance_km != null ? `행정동 거리 약 ${Number(rp.distance_km).toFixed(2)}km` : ''].filter(Boolean).join(' · ') || '—';
     const evalR = c.eval_radius_m != null ? c.eval_radius_m : (stage2Data && stage2Data.eval_radius_m != null ? stage2Data.eval_radius_m : null);
 
-    const rows = [
-        ['기준 베이스', comp.base],
-        ['앵커·상권 가산', comp.anchor_pois],
-        ['경쟁 밀도 감점', comp.competition_penalty],
-        ['거시 상권 프록시', comp.transit_commercial_proxy],
-        ['연령대 프록시', comp.young_cohort_proxy],
-    ];
+    const rows = (comp.foot_traffic != null || comp.visibility_access != null)
+        ? [
+            ['유동인구 지수 (프록시, max 30)', comp.foot_traffic],
+            ['가시성·접근 (max 20)', comp.visibility_access],
+            ['배후 주거 (프록시, max 20)', comp.residential_proximity],
+            ['앵커 브랜드 (100m, max 15)', comp.anchor_franchises],
+            ['메디컬 시너지 (100m, max 10)', comp.medical_synergy],
+            ['주차·인프라 (max 5)', comp.parking_infrastructure],
+        ]
+        : [
+            ['기준 베이스', comp.base],
+            ['앵커·상권 가산', comp.anchor_pois],
+            ['경쟁 밀도 감점', comp.competition_penalty],
+            ['거시 상권 프록시', comp.transit_commercial_proxy],
+            ['연령대 프록시', comp.young_cohort_proxy],
+        ];
     let formulaHtml = '';
     rows.forEach(([label, val]) => {
         if (val === undefined || val === null) return;
         const num = typeof val === 'number' ? val : parseFloat(val);
-        const disp = Number.isFinite(num) ? (num > 0 && !label.includes('감점') ? '+' : '') + String(num) : escHtml2(String(val));
+        const disp = Number.isFinite(num) ? String(num) : escHtml2(String(val));
         formulaHtml += `<div class="stage2-detail-formula-row"><span>${escHtml2(label)}</span><span style="font-weight:800;color:#0f172a;">${disp}</span></div>`;
     });
 
@@ -814,11 +823,20 @@ window.openStage2CandidateDetail = function (idx) {
         <p style="margin:0 0 16px;font-size:12px;color:#94a3b8;">좌표 ${Number(c.lat).toFixed(5)}, ${Number(c.lng).toFixed(5)}${evalR != null ? ` · 평가 반경 ${escHtml2(String(evalR))}m` : ''}</p>
         <div class="stage2-detail-grid">
             <div class="stage2-detail-cell"><span class="lbl">반경 내 경쟁(추정)</span><span class="val">${formatStage2Metric(c.competitor_count)}곳</span></div>
-            <div class="stage2-detail-cell"><span class="lbl">앵커 프랜차이즈</span><span class="val">${formatStage2Metric(c.anchor_poi_count)}곳</span></div>
+            <div class="stage2-detail-cell"><span class="lbl">앵커(평가 반경)</span><span class="val">${formatStage2Metric(c.anchor_poi_count)}곳</span></div>
+            <div class="stage2-detail-cell"><span class="lbl">앵커(100m·스코어)</span><span class="val">${c.anchor_poi_count_100m != null ? formatStage2Metric(c.anchor_poi_count_100m) + '곳' : '—'}</span></div>
+            <div class="stage2-detail-cell"><span class="lbl">의료시설(100m·동일과목)</span><span class="val">${c.medical_facility_count_100m != null ? formatStage2Metric(c.medical_facility_count_100m) + '곳' : '—'}</span></div>
             <div class="stage2-detail-cell" style="grid-column:1/-1;"><span class="lbl">거시 프록시(행정동)</span><span class="val" style="font-size:13px;">${escHtml2(locLine)}</span></div>
         </div>
         <div class="stage2-detail-section-title">점수 구성 (화이트박스)</div>
         <div class="stage2-detail-formula">${formulaHtml || '<span style="color:#64748b;font-weight:600;">세부 구성 정보가 없습니다.</span>'}</div>
+        ${(() => {
+            const sm = sc.scoring_meta || {};
+            const notes = Array.isArray(sm.notes) ? sm.notes : [];
+            if (!notes.length) return '';
+            const body = notes.map((n) => `<p style="margin:6px 0;">${escHtml2(String(n))}</p>`).join('');
+            return `<div class="stage2-detail-section-title" style="margin-top:14px;">데이터·프록시 안내</div><div style="font-size:11px;color:#64748b;line-height:1.5;font-weight:600;">${body}</div>`;
+        })()}
         ${rationale}
         <div class="stage2-detail-actions no-print">
             <button type="button" class="btn-map" onclick="window.panToStage2Candidate(window.__stage2DetailIdx); closeStage2CandidateModal();">지도로 이동 · 확대</button>
