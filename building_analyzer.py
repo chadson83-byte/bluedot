@@ -5,8 +5,8 @@ BLUEDOT - 경쟁 병원 건물 노후화 분석 모듈
 공공데이터포털 '건축HUB_건축물대장정보' API를 통해
 경쟁 병원이 입점한 건물의 연식/엘리베이터/주차 스펙을 조회하여 요약 리포트를 생성한다.
 
-요구사항 준수:
-- SERVICE_KEY 상수로 고정
+요구사항:
+- serviceKey: 환경변수 DATA_GO_KR_SERVICE_KEY(또는 BUILDING_HUB_SERVICE_KEY), 없으면 레거시 기본값
 - URL은 f-string으로 직접 조립(quote 미사용)
 - requests.get(url, verify=False) 호출
 - _type=json 응답에서 useAprDay, rideUseElvtCnt/emgenUseElvtCnt, indrAutoUtcnt/oudrAutoUtcnt 추출
@@ -16,6 +16,7 @@ BLUEDOT - 경쟁 병원 건물 노후화 분석 모듈
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -27,8 +28,16 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from engine.building_cache_pg import ensure_cache_table, get_cached, upsert_cached
 
-# ⚠️ 필수: 인증키 전역 상수
-SERVICE_KEY = "8ee102c5d025b9a9709736175aa0168bac653098ef0f762e797f727d77dc7da9"
+# 로컬·레거시 호환. 운영은 DATA_GO_KR_SERVICE_KEY(또는 BUILDING_HUB_SERVICE_KEY) 환경변수 권장.
+_LEGACY_SERVICE_KEY = "8ee102c5d025b9a9709736175aa0168bac653098ef0f762e797f727d77dc7da9"
+
+
+def _building_hub_service_key() -> str:
+    return (
+        (os.getenv("DATA_GO_KR_SERVICE_KEY") or "").strip()
+        or (os.getenv("BUILDING_HUB_SERVICE_KEY") or "").strip()
+        or _LEGACY_SERVICE_KEY
+    )
 
 ENDPOINT = "https://apis.data.go.kr/1613000/BldRgstHubService/getBrTitleInfo"
 
@@ -95,10 +104,14 @@ def fetch_building_info(
             "raw": None,
         }
 
+    service_key = _building_hub_service_key()
+    if not service_key:
+        return {"ok": False, "message": "건축HUB API 키 미설정(DATA_GO_KR_SERVICE_KEY)", "raw": None}
+
     # ⚠️ quote 사용 금지: f-string으로 직접 URL 조립
     url = (
         f"{ENDPOINT}"
-        f"?serviceKey={SERVICE_KEY}"
+        f"?serviceKey={service_key}"
         f"&sigunguCd={sigunguCd}"
         f"&bjdongCd={bjdongCd}"
         f"&bun={bun4}"
@@ -115,31 +128,44 @@ def fetch_building_info(
 
     try:
         res = requests.get(url, verify=False, timeout=timeout)
-    except Exception:
-        # 우아한 실패: 상세 에러를 사용자 화면에 노출하지 않음
-        return {"ok": False, "message": "현재 공공데이터 서버 점검 중으로 확인 불가", "raw": None}
+    except Exception as e:
+        return {
+            "ok": False,
+            "message": f"건축물대장 API 네트워크 오류: {type(e).__name__}",
+            "raw": None,
+        }
 
     if res.status_code == 403:
         return {
             "ok": False,
-            "message": "현재 공공데이터 서버 점검 중으로 확인 불가",
+            "message": "건축HUB 403 — 공공데이터포털에서 서비스키·일일한도·등록 IP를 확인하세요.",
             "raw": None,
         }
     if res.status_code >= 400:
-        return {"ok": False, "message": "현재 공공데이터 서버 점검 중으로 확인 불가", "raw": None}
+        return {
+            "ok": False,
+            "message": f"건축HUB HTTP {res.status_code} — 응답 본문을 공공데이터포털에서 확인하세요.",
+            "raw": None,
+        }
 
     try:
         data = res.json()
     except Exception:
-        return {"ok": False, "message": "현재 공공데이터 서버 점검 중으로 확인 불가", "raw": None}
+        return {"ok": False, "message": "건축HUB 응답이 JSON이 아닙니다.", "raw": None}
 
     try:
         header = (((data or {}).get("response") or {}).get("header") or {})
         body = (((data or {}).get("response") or {}).get("body") or {})
         result_code = str(header.get("resultCode", "")).strip()
+        result_msg = str(header.get("resultMsg", "") or "").strip()
         # 공공데이터포털은 정상 "00" 패턴이 많지만, 다른 코드도 있을 수 있어 메시지 우선
         if result_code and result_code not in ("00", "0"):
-            return {"ok": False, "message": "현재 공공데이터 서버 점검 중으로 확인 불가", "raw": None}
+            hint = f" ({result_msg})" if result_msg else ""
+            return {
+                "ok": False,
+                "message": f"건축HUB API 오류 코드 {result_code}{hint}",
+                "raw": None,
+            }
 
         items = (body.get("items") or {}).get("item")
         if items is None or items == "":
@@ -176,8 +202,7 @@ def fetch_building_info(
             pass
         return out
     except Exception as e:
-        # 트래픽 초과/형식 변경 등 어떤 예외든 앱이 뻗지 않게
-        return {"ok": False, "message": "현재 공공데이터 서버 점검 중으로 확인 불가", "raw": None}
+        return {"ok": False, "message": f"건축HUB 응답 처리 오류: {type(e).__name__}", "raw": None}
 
 
 def generate_aging_report(

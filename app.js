@@ -957,7 +957,12 @@ function renderPhase2Status(rec) {
     const filterApplied = meta.walk_filter_applied !== false;
     wrap.style.display = 'block';
 
-    if (usedFallback) {
+    if (meta.postgis_skipped) {
+        chip.style.background = '#eff6ff';
+        chip.style.color = '#1d4ed8';
+        chip.style.borderColor = '#bfdbfe';
+        text.innerHTML = `도보 네트워크(DB) 미연결 — 반경 근사 분석 (${wm}분 기준)`;
+    } else if (usedFallback) {
         chip.style.background = '#fffbeb';
         chip.style.color = '#b45309';
         chip.style.borderColor = '#fcd34d';

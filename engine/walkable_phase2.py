@@ -37,6 +37,8 @@ class Phase2Config:
     db_password: str = "postgres"
     meters_per_minute: float = 70.0
     fallback_radius_m: float = 500.0
+    # False면 DB 연결 시도 없이 반경 폴백만 (Fly 등 PostGIS 없는 배포)
+    use_pgr_network: bool = True
 
 
 class WalkingPolygonError(RuntimeError):
@@ -317,6 +319,26 @@ def analyze_location(
     raw_rows = list(raw_data or [])
     used_fallback = False
     warn: Optional[str] = None
+
+    if not cfg.use_pgr_network:
+        used_fallback = True
+        warn = (
+            "PostGIS+pgRouting 미연결 — 반경 근사만 사용합니다. "
+            "실도보 폴리곤은 OSM 도로망 DB를 띄운 뒤 POSTGIS_HOST 등을 설정하세요."
+        )
+        polygon = walkable_polygon_stub(lat, lon, minutes)
+        filtered = _fallback_radius_filter(lat, lon, raw_rows, cfg.fallback_radius_m)
+        persona = calculate_persona_score(filtered, clinic_type)
+        return {
+            "status": "success",
+            "used_fallback": False,
+            "postgis_skipped": True,
+            "warning": warn,
+            "walk_polygon": polygon,
+            "filtered_count": len(filtered),
+            "filtered_rows": filtered,
+            "persona": persona,
+        }
 
     try:
         polygon = get_walking_polygon(lat, lon, minutes, cfg)

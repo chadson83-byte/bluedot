@@ -21,6 +21,13 @@ except Exception:  # pragma: no cover
     psycopg2 = None
 
 
+def _use_pg_cache() -> bool:
+    """Fly에서 POSTGIS_HOST 없으면 127.0.0.1 연결 대기(초당 지연) 방지."""
+    if os.getenv("FLY_APP_NAME", "").strip() and not os.getenv("POSTGIS_HOST", "").strip():
+        return False
+    return True
+
+
 def _conn_params():
     return dict(
         host=os.getenv("POSTGIS_HOST", "127.0.0.1"),
@@ -33,7 +40,7 @@ def _conn_params():
 
 
 def ensure_cache_table() -> None:
-    if psycopg2 is None:
+    if psycopg2 is None or not _use_pg_cache():
         return
     sql = """
     CREATE TABLE IF NOT EXISTS bluedot_building_cache (
@@ -59,7 +66,7 @@ def ensure_cache_table() -> None:
 
 
 def get_cached(sigungu_cd: str, bjdong_cd: str, bun: str, ji: str) -> Optional[Dict[str, Any]]:
-    if psycopg2 is None:
+    if psycopg2 is None or not _use_pg_cache():
         return None
     try:
         conn = psycopg2.connect(**_conn_params())
@@ -80,7 +87,7 @@ def get_cached(sigungu_cd: str, bjdong_cd: str, bun: str, ji: str) -> Optional[D
 
 
 def upsert_cached(sigungu_cd: str, bjdong_cd: str, bun: str, ji: str, payload: Dict[str, Any]) -> None:
-    if psycopg2 is None:
+    if psycopg2 is None or not _use_pg_cache():
         return
     try:
         conn = psycopg2.connect(**_conn_params())

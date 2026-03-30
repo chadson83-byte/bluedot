@@ -31,7 +31,7 @@ from engine.killer_insights import (
     enhance_time_matrix_killer,
 )
 from engine.car_insurance_stats import build_car_insurance_insight_for_region
-from engine.walkable_phase2 import analyze_location, Phase2Config
+from engine.walkable_phase2 import analyze_location, get_walking_polygon, Phase2Config
 from building_analyzer import generate_aging_report
 
 import re
@@ -43,7 +43,16 @@ app = FastAPI(title="BLUEDOT Backend API - National Flexible Radius Edition")
 @app.get("/api/health")
 def api_health():
     """프론트·배포 점검용 — 200이면 API 서버 정상."""
-    return {"ok": True, "service": "bluedot", "docs": "/docs"}
+    p2 = _build_phase2_config()
+    return {
+        "ok": True,
+        "service": "bluedot",
+        "docs": "/docs",
+        "features": {
+            "postgis_walking_polygon": bool(p2.use_pgr_network),
+            "fly": bool(os.getenv("FLY_APP_NAME", "").strip()),
+        },
+    }
 
 
 # DB 초기화
@@ -125,14 +134,30 @@ def _dept_to_clinic_type(dept: str) -> str:
 
 
 def _build_phase2_config() -> Phase2Config:
+    """
+    PostGIS: POSTGIS_HOST가 비어 있고 Fly에서 돌면 도보 네트워크를 쓰지 않음(연결 타임아웃 방지).
+    로컬(uvicorn)에서는 기본 127.0.0.1로 기존과 같이 시도.
+    """
+    host_env = os.getenv("POSTGIS_HOST", "").strip()
+    on_fly = bool(os.getenv("FLY_APP_NAME", "").strip())
+    if host_env:
+        use_pgr = True
+        db_host = host_env
+    elif on_fly:
+        use_pgr = False
+        db_host = "127.0.0.1"
+    else:
+        use_pgr = True
+        db_host = "127.0.0.1"
     return Phase2Config(
-        db_host=os.getenv("POSTGIS_HOST", "127.0.0.1"),
+        db_host=db_host,
         db_port=int(os.getenv("POSTGIS_PORT", "5432")),
         db_name=os.getenv("POSTGIS_DB", "gis_db"),
         db_user=os.getenv("POSTGIS_USER", "postgres"),
         db_password=os.getenv("POSTGIS_PASSWORD", "postgres"),
         meters_per_minute=float(os.getenv("WALK_METERS_PER_MINUTE", "70")),
         fallback_radius_m=float(os.getenv("WALK_FALLBACK_RADIUS_M", "500")),
+        use_pgr_network=use_pgr,
     )
 
 
@@ -159,6 +184,7 @@ def _apply_phase2_walkable_filter(df: pd.DataFrame, lat: float, lng: float, dept
         out_df = df
     return out_df, {
         "used_fallback": bool(result.get("used_fallback")),
+        "postgis_skipped": bool(result.get("postgis_skipped")),
         "warning": result.get("warning"),
         "filtered_count": int(result.get("filtered_count") or 0),
         "walk_polygon": result.get("walk_polygon"),
@@ -175,6 +201,28 @@ def _convert_addr_to_jibun_codes(addr: str, fallback_sigungu_cd: str = "") -> Di
         return resolve_jibun_codes(addr, fallback_sigungu_cd=fallback_sigungu_cd)
     except Exception as e:
         return {"ok": False, "message": f"주소 변환 실패: {e}", "address": addr, "sigungu_cd": fallback_sigungu_cd}
+
+
+def _competitors_for_building_aging(real_hosps, limit: int = 5) -> list:
+    """건축물대장 조회용 경쟁기관 리스트 — 주소→지번·법정동(Kakao/JUSO/정규식)."""
+    out = []
+    lim = max(1, min(int(limit), 20))
+    for h in (real_hosps or [])[:lim]:
+        conv = _convert_addr_to_jibun_codes(
+            str(h.get("address") or ""),
+            fallback_sigungu_cd=str(h.get("sigungu_cd") or ""),
+        )
+        out.append(
+            {
+                "name": h.get("name") or h.get("display_name") or "경쟁기관",
+                "address": h.get("address"),
+                "sigungu_cd": str(conv.get("sigungu_cd") or h.get("sigungu_cd") or ""),
+                "bjdong_cd": str(conv.get("bjdong_cd") or ""),
+                "bun": str(conv.get("bun") or ""),
+                "ji": str(conv.get("ji") or ""),
+            }
+        )
+    return out
 
 
 # 🚀 [AI 검색] 프롬프트에서 지역명 추출 → 마스터 데이터 행정구역 필터용
@@ -1229,6 +1277,7 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
                     },
                     "phase2": {
                         "used_fallback": bool(phase2_meta.get("used_fallback")),
+                        "postgis_skipped": bool(phase2_meta.get("postgis_skipped")),
                         "walk_minutes": walk_minutes,
                         "walk_filter_applied": True,
                     },
@@ -1237,19 +1286,7 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
                 all_hospitals.extend(real_hosps)
                 _node["killer_insights"] = build_node_killer_insights(real_hosps, row, node_lat, node_lng)
                 try:
-                    # 건물 노후화: 외부 API 의존(타임아웃/점검) → 분석 API는 절대 죽지 않게 시간 예산을 제한
-                    competitors = []
-                    for h in (real_hosps or [])[:5]:
-                        competitors.append(
-                            {
-                                "name": h.get("name") or h.get("display_name") or "경쟁기관",
-                                "address": h.get("address"),
-                                "sigungu_cd": (h.get("sigungu_cd") or ""),
-                                "bjdong_cd": "",
-                                "bun": "",
-                                "ji": "",
-                            }
-                        )
+                    competitors = _competitors_for_building_aging(real_hosps, limit=5)
                     _node["building_aging_report"] = generate_aging_report(competitors, sleep_sec=0.05, max_total_sec=4.0)
                 except Exception as _bld_e:
                     _node["building_aging_report"] = {
@@ -1518,6 +1555,7 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                     },
                     "phase2": {
                         "used_fallback": bool(phase2_meta.get("used_fallback")),
+                        "postgis_skipped": bool(phase2_meta.get("postgis_skipped")),
                         "walk_minutes": walk_minutes,
                         "walk_filter_applied": True,
                     },
@@ -1526,18 +1564,7 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                 all_hospitals.extend(real_hosps)
                 _node["killer_insights"] = build_node_killer_insights(real_hosps, row, node_lat, node_lng)
                 try:
-                    competitors = []
-                    for h in (real_hosps or [])[:5]:
-                        competitors.append(
-                            {
-                                "name": h.get("name") or h.get("display_name") or "경쟁기관",
-                                "address": h.get("address"),
-                                "sigungu_cd": (h.get("sigungu_cd") or ""),
-                                "bjdong_cd": "",
-                                "bun": "",
-                                "ji": "",
-                            }
-                        )
+                    competitors = _competitors_for_building_aging(real_hosps, limit=5)
                     _node["building_aging_report"] = generate_aging_report(competitors, sleep_sec=0.05, max_total_sec=4.0)
                 except Exception as _bld_e:
                     _node["building_aging_report"] = {
@@ -1670,7 +1697,18 @@ def api_cfo_rent_risk(lat: float, lng: float, radius_km: float = 3.0):
 
 @app.get("/api/geo/walkable-polygon")
 def api_walkable_polygon(lat: float, lng: float, minutes: float = 10.0):
-    """도보 유효 범위 GeoJSON (V1 원형 근사)."""
+    """도보 유효 범위 GeoJSON. PostGIS 설정 시 pgRouting 폴리곤, 아니면 원형 근사."""
+    cfg = _build_phase2_config()
+    if cfg.use_pgr_network:
+        try:
+            poly = get_walking_polygon(lat, lng, minutes, cfg)
+            poly["data_source"] = "postgis_pgrouting"
+            return poly
+        except Exception as e:
+            stub = walkable_polygon_stub(lat, lng, minutes)
+            stub["fallback"] = True
+            stub["fallback_reason"] = str(e)[:240]
+            return stub
     return walkable_polygon_stub(lat, lng, minutes)
 
 

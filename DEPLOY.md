@@ -28,9 +28,14 @@ fly secrets set KAKAO_REST_KEY="카카오_REST_API_키"
 fly secrets set GOOGLE_CLIENT_ID="구글_클라이언트_ID"
 fly secrets set PORTONE_API_KEY="포트원_REST키"
 fly secrets set PORTONE_API_SECRET="포트원_시크릿"
+fly secrets set DATA_GO_KR_SERVICE_KEY="공공데이터포털_건축HUB_인증키"
 ```
 
 - 로그인/주소 API를 안 쓰면 일부는 생략 가능하지만, **`BLUEDOT_JWT_SECRET`**은 프로덕션에서 꼭 고유 값으로 설정하세요.
+- **`DATA_GO_KR_SERVICE_KEY`**: 경쟁 병원 건물 노후화(건축물대장)용. 미설정 시 코드에 포함된 레거시 키로 동작할 수 있으나, 운영에서는 본인 키로 교체하는 것을 권장합니다.
+- **도보 폴리곤(PostGIS)**: Fly는 기본적으로 `FLY_APP_NAME`이 있으면 PostGIS 연결을 시도하지 않고 반경 근사만 씁니다(느린 DB 타임아웃 방지). OSM+pgRouting DB를 띄운 뒤 `POSTGIS_HOST` 등을 secrets로 넣으면 실도보 폴리곤이 켜집니다.
+
+`/api/health` 응답의 `features.postgis_walking_polygon` 으로 현재 모드를 확인할 수 있습니다.
 - `BLUEDOT_TEST_MODE`는 `fly.toml`의 `[env]`에서 이미 `0`입니다. 결제 테스트 모드는 켜지 마세요.
 
 ### 동작 확인
