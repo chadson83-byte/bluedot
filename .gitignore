@@ -1,0 +1,6 @@
+data/
+*.pbf
+*.csv
+*.db
+__pycache__/
+.venv/

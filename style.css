@@ -1,0 +1,383 @@
+/* =========================================================
+   [1] 글로벌 테마: BLUEDOT (Vivid Teal & Bright Pastel)
+   ========================================================= */
+:root {
+    --brand-primary: #06B6D4;
+    --brand-dark: #0891B2;
+    --brand-light: #CFFAFE;
+    --brand-fab: #FF5A20;
+    
+    --bg-main: #FFFFFF;
+    --bg-sub: #F9FAFB;
+    
+    --text-main: #111827;
+    --text-sub: #6B7280;
+    --border-color: #E5E7EB;
+    
+    --c-bg-1: #FEE2E2; --c-bd-1: #EF4444; 
+    --c-bg-2: #FAE8FF; --c-bd-2: #D946EF; 
+    --c-bg-3: #FEF3C7; --c-bd-3: #F59E0B; 
+    --c-bg-4: #DBEAFE; --c-bd-4: #3B82F6; 
+    --c-bg-5: #D1FAE5; --c-bd-5: #10B981; 
+    --c-bg-6: #E0E7FF; --c-bd-6: #6366F1; 
+    --c-bg-7: #FFEDD5; --c-bd-7: #F97316; 
+    --c-bg-8: #CCFBF1; --c-bd-8: #14B8A6; 
+    --c-bg-9: #FCE7F3; --c-bd-9: #F43F5E; 
+    --c-bg-10: #F3E8FF; --c-bd-10: #A855F7; 
+    --c-bg-11: #FFE4E6; --c-bd-11: #E11D48; 
+    --c-bg-12: #DCFCE7; --c-bd-12: #059669; 
+
+    --shadow-topbar: 0 2px 10px rgba(0,0,0,0.05);
+    --shadow-floating: 0 10px 25px rgba(0, 0, 0, 0.1);
+    --shadow-soft: 0 4px 20px rgba(0, 0, 0, 0.05); 
+    --radius-xl: 28px;
+    --topbar-height: 65px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; outline: none; }
+body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); color: var(--text-main); width: 100%; height: 100%; overflow: hidden; -webkit-font-smoothing: antialiased; }
+
+/* =========================================================
+   [2] BLUEDOT 스플래시
+   ========================================================= */
+#splash-screen {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: var(--brand-dark); z-index: 9999;
+    display: flex; justify-content: center; align-items: center;
+    transition: opacity 0.6s ease, visibility 0.6s;
+}
+.splash-content { text-align: center; color: white; }
+.splash-logo { animation: nodePulse 2s infinite ease-in-out; }
+.splash-title { font-size: 34px; font-weight: 900; letter-spacing: 1px; margin-bottom: 4px; }
+.splash-sub { font-size: 12px; opacity: 0.8; letter-spacing: 3px; text-transform: uppercase; font-weight: 600; }
+@keyframes nodePulse { 0%, 100% { transform: scale(1); filter: drop-shadow(0 0 10px rgba(207, 250, 254, 0.5)); } 50% { transform: scale(1.05); filter: drop-shadow(0 0 25px rgba(207, 250, 254, 0.9)); } }
+
+/* =========================================================
+   [3] 메인 레이아웃 및 탑바
+   ========================================================= */
+#app { width: 100%; height: 100%; position: relative; display: flex; flex-direction: column; }
+
+.top-bar { 
+    width: 100%; height: var(--topbar-height); background: rgba(255,255,255,0.95); 
+    backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); 
+    position: absolute; top: 0; left: 0; z-index: 100; 
+    border-bottom: 1px solid var(--border-color); box-shadow: var(--shadow-topbar); 
+    padding-top: env(safe-area-inset-top, 0px);
+}
+.top-bar-content { width: 100%; height: 100%; max-width: 600px; margin: 0 auto; display: flex; justify-content: space-between; align-items: center; padding: 0 20px; }
+
+.app-logo { font-size: 20px; font-weight: 900; color: var(--text-main); letter-spacing: -0.5px; }
+
+.region-selector { display: flex; align-items: center; gap: 4px; font-weight: 800; font-size: 15px; cursor: pointer; color: var(--text-main); padding: 6px 12px; border-radius: 12px; transition: 0.2s; background: var(--bg-sub); }
+.region-selector:active { background: #E5E7EB; }
+.icon-down { width: 18px; height: 18px; stroke: var(--text-main); fill: none; stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+
+.top-icons { display: flex; align-items: center; gap: 16px; }
+.icon-btn { position: relative; width: 28px; height: 28px; cursor: pointer; display: flex; align-items: center; justify-content: center; color: var(--text-main); }
+.icon-btn svg { width: 100%; height: 100%; stroke: currentColor; fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+
+.noti-badge { position: absolute; top: 0px; right: 0px; width: 9px; height: 9px; background: #EF4444; border-radius: 50%; border: 1px solid white; }
+
+/* =========================================================
+   [4] 🚀 NEW: AI 자연어 검색창
+   ========================================================= */
+.ai-search-box {
+    position: absolute;
+    top: calc(var(--topbar-height) + 16px);
+    left: 50%;
+    transform: translateX(-50%);
+    width: 90%;
+    max-width: 400px;
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+    display: flex;
+    align-items: center;
+    padding: 10px 16px;
+    z-index: 90;
+    border: 2px solid transparent;
+    transition: all 0.3s ease;
+}
+.ai-search-box:focus-within {
+    border-color: var(--brand-primary);
+    box-shadow: 0 10px 40px rgba(6, 182, 212, 0.2);
+}
+.ai-sparkle {
+    width: 20px; height: 20px;
+    stroke: var(--brand-primary);
+    fill: none; stroke-width: 2; margin-right: 10px;
+}
+.ai-search-box input {
+    flex: 1; border: none; background: transparent;
+    font-size: 14px; font-weight: 700; color: var(--text-main);
+    font-family: 'Pretendard', sans-serif;
+}
+.ai-search-box input::placeholder { color: #9CA3AF; font-weight: 500; }
+.ai-submit-btn {
+    background: var(--brand-primary); border: none; border-radius: 10px;
+    width: 32px; height: 32px; display: flex; justify-content: center; align-items: center;
+    cursor: pointer; color: white; transition: transform 0.2s;
+}
+.ai-submit-btn:active { transform: scale(0.9); }
+
+/* =========================================================
+   [5] 지도 및 컨트롤러 & 십자선(Crosshair)
+   ========================================================= */
+#map { width: 100%; flex: 1; z-index: 1; position: absolute; top: 0; left: 0; height: 100%; }
+
+/* 🚀 NEW: 지도 중앙 십자선 (드래그 주소 연동용) */
+.map-crosshair {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 24px; height: 24px;
+    transform: translate(-50%, -50%);
+    pointer-events: none; /* 클릭 방해 금지 */
+    z-index: 10;
+}
+.map-crosshair::before { content: ''; position: absolute; top: 11px; left: 0; width: 24px; height: 2px; background: rgba(0,0,0,0.6); }
+.map-crosshair::after { content: ''; position: absolute; top: 0; left: 11px; width: 2px; height: 24px; background: rgba(0,0,0,0.6); }
+
+.map-controls { 
+    position: absolute; right: 16px; top: calc(var(--topbar-height) + 80px); 
+    z-index: 50; display: flex; flex-direction: column; gap: 8px; 
+}
+.ctrl-btn { 
+    width: 44px; height: 44px; background: #FFFFFF; border-radius: 12px; 
+    display: flex; justify-content: center; align-items: center; 
+    box-shadow: var(--shadow-floating); cursor: pointer; border: 1px solid var(--border-color); 
+    font-size: 20px; font-weight: 700; color: var(--text-main); transition: 0.2s; 
+}
+.ctrl-btn:active { transform: scale(0.96); background: var(--bg-sub); }
+.my-loc-btn svg { width: 20px; height: 20px; stroke: var(--brand-primary); fill: none; stroke-width: 2; }
+
+/* =========================================================
+   [6] 🚀 하단 분석 패널 (Hover Peek Mode)
+   ========================================================= */
+.bottom-sheet { 
+    position: absolute; bottom: 0; left: 0; width: 100%; z-index: 80; 
+    background: var(--bg-main); border-radius: var(--radius-xl) var(--radius-xl) 0 0; 
+    box-shadow: 0 -15px 40px rgba(0,0,0,0.15); 
+    padding-bottom: env(safe-area-inset-bottom, 20px); 
+    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); 
+}
+
+/* 🚀 NEW: Hover/Peek 애니메이션 로직 */
+/* 기본 상태: 절반만 보이고 살짝 내려가 있음 */
+.bottom-sheet.peek-mode {
+    transform: translateY(60%); /* 패널 높이의 60%를 아래로 숨김 */
+}
+/* 마우스를 올리거나 터치하면 전체가 올라옴 */
+.bottom-sheet.peek-mode:hover, .bottom-sheet.peek-mode:active {
+    transform: translateY(0);
+}
+/* 분석을 시작하거나 결과가 나왔을 때는 완전히 숨김 */
+.bottom-sheet.hidden-mode {
+    transform: translateY(120%) !important;
+}
+
+.sheet-handle { width: 40px; height: 5px; background: #E5E7EB; border-radius: 3px; margin: 14px auto 10px; }
+
+/* 🔥 가림 현상 해결 핵심 코드: padding-bottom을 140px로 늘리고, 스크롤바(overflow-y) 활성화 */
+.sheet-content { 
+    width: 100%; 
+    max-width: 600px; 
+    margin: 0 auto; 
+    padding: 0 24px 140px 24px; 
+    overflow-y: auto; 
+    max-height: 75vh; 
+}
+
+.peek-hint { transition: opacity 0.3s; opacity: 1; }
+.bottom-sheet.peek-mode:hover .peek-hint { opacity: 0; display: none;} /* 올라오면 힌트 텍스트 숨김 */
+
+.dept-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
+@media screen and (max-width: 380px) { .dept-grid { grid-template-columns: repeat(3, 1fr); } }
+
+.dept-item { 
+    background: var(--bg-sub); border-radius: 16px; padding: 14px 6px; 
+    cursor: pointer; transition: 0.2s; border: 2px solid transparent; text-align: center;
+}
+.dept-item:active { transform: scale(0.97); }
+.dept-item.selected { background: var(--brand-light); border-color: var(--brand-primary); }
+
+.dept-icon { font-size: 28px; margin-bottom: 6px; width: 50px; height: 50px; border-radius: 50%; display: flex; align-items: center; justify-content: center; margin: 0 auto 8px; transition: 0.2s; }
+.dept-label { font-size: 12px; font-weight: 700; color: var(--text-main); white-space: nowrap; letter-spacing: -0.5px;}
+
+.dept-1 .dept-icon { background: var(--c-bg-1); } .dept-2 .dept-icon { background: var(--c-bg-2); }
+.dept-3 .dept-icon { background: var(--c-bg-3); } .dept-4 .dept-icon { background: var(--c-bg-4); }
+.dept-5 .dept-icon { background: var(--c-bg-5); } .dept-6 .dept-icon { background: var(--c-bg-6); }
+.dept-7 .dept-icon { background: var(--c-bg-7); } .dept-8 .dept-icon { background: var(--c-bg-8); }
+.dept-9 .dept-icon { background: var(--c-bg-9); } .dept-10 .dept-icon { background: var(--c-bg-10); }
+.dept-11 .dept-icon { background: var(--c-bg-11); } .dept-12 .dept-icon { background: var(--c-bg-12); }
+
+.dept-grid::-webkit-scrollbar { display: none; }
+
+.analysis-title { font-size: 18px; font-weight: 800; color: var(--text-main); }
+
+.analyze-btn { 
+    width: 100%; background: var(--text-main); color: white; border: none; 
+    padding: 17px; border-radius: 16px; font-size: 16px; font-weight: 800; 
+    cursor: pointer; transition: 0.2s; box-shadow: 0 5px 15px rgba(17, 24, 39, 0.3); 
+    animation: slideUpIn 0.3s ease;
+}
+.analyze-btn:active { transform: scale(0.98); background: #000000; }
+@keyframes slideUpIn { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+
+/* =========================================================
+   [7] 모달 공통 (지역, 결제, 리포트)
+   ========================================================= */
+.modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.6); backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px); z-index: 2000; display: flex; justify-content: center; align-items: center; }
+.modal-body { background: var(--bg-main); width: 90%; max-width: 400px; border-radius: var(--radius-xl); padding: 24px; box-shadow: var(--shadow-floating); animation: popIn 0.3s cubic-bezier(0.16, 1, 0.3, 1); }
+@keyframes popIn { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.modal-header h3 { font-size: 18px; font-weight: 800; color: var(--text-main); }
+.close-btn { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-sub); }
+.input-field { width: 100%; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--border-color); background: var(--bg-main); font-size: 14px; outline: none; transition: all 0.2s; color: var(--text-main); }
+.input-field:focus { border-color: var(--brand-primary); box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.1); }
+.btn-primary { width: 100%; padding: 14px; border-radius: 12px; border: none; background: var(--brand-primary); color: white; font-weight: 700; font-size: 15px; cursor: pointer; transition: transform 0.2s; }
+.btn-primary:active { transform: scale(0.98); }
+.search-result-item { padding: 16px 0; border-bottom: 1px solid var(--border-color); cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+.search-result-item:active { background: var(--bg-sub); }
+.search-result-title { font-size: 15px; font-weight: 800; color: var(--text-main); margin-bottom: 4px; }
+.search-result-addr { font-size: 12px; font-weight: 500; color: var(--text-sub); }
+.payment-card { border: 2px solid var(--text-main); box-shadow: 0 15px 35px rgba(0, 0, 0, 0.15); }
+
+/* =========================================================
+   [8] 지도 마커 & Top 5 랭킹 뱃지 시각화
+   ========================================================= */
+.custom-marker { width: 32px; height: 32px; background: white; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 16px; box-shadow: 0 4px 10px rgba(0,0,0,0.2); border: 2px solid; cursor: pointer; transition: transform 0.2s; opacity: 0.8; }
+.custom-marker-building { border-radius: 8px !important; }
+.custom-marker-building svg { display: block; }
+/* BLUEDOT 로고 스타일 경쟁기관 마커 */
+.bluedot-dot:hover { transform: scale(1.15); }
+.custom-marker:hover { transform: scale(1.2); z-index: 10 !important; opacity: 1; }
+.marker-dept-1 { border-color: var(--c-bd-1); } .marker-dept-2 { border-color: var(--c-bd-2); }
+.marker-dept-3 { border-color: var(--c-bd-3); } .marker-dept-4 { border-color: var(--c-bd-4); }
+.marker-dept-5 { border-color: var(--c-bd-5); } .marker-dept-6 { border-color: var(--c-bd-6); }
+.marker-dept-7 { border-color: var(--c-bd-7); } .marker-dept-8 { border-color: var(--c-bd-8); }
+.marker-dept-9 { border-color: var(--c-bd-9); } .marker-dept-10 { border-color: var(--c-bd-10); }
+.marker-dept-11 { border-color: var(--c-bd-11); } .marker-dept-12 { border-color: var(--c-bd-12); }
+
+.ranking-badge { width: 44px; height: 44px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; font-weight: 900; box-shadow: 0 6px 15px rgba(0,0,0,0.3); border: 3px solid white; cursor: pointer; animation: bounceBadge 2s infinite; z-index: 100 !important; }
+.ranking-badge .rank-num { font-size: 16px; line-height: 1; }
+.ranking-badge .rank-label { font-size: 9px; font-weight: 700; opacity: 0.9; margin-top: 2px; }
+@keyframes bounceBadge { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
+
+/* =========================================================
+   [9] 🚀 핀셋 수정: 결과 패널 하단 플로팅 (지도 가림 방지)
+   ========================================================= */
+.results-panel { 
+    position: absolute; 
+    bottom: 20px; /* 위에서 덮지 않고, 바닥에 띄움 */
+    left: 0; 
+    width: 100%; 
+    z-index: 200; 
+    background: transparent; /* 까만 배경 삭제 -> 지도가 보임 */
+    padding: 0; 
+    pointer-events: none; /* 빈 공간 클릭하면 지도가 움직이게 설정 */
+    animation: slideUpCard 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards; 
+}
+@keyframes slideUpCard { 
+    from { transform: translateY(100%); } 
+    to { transform: translateY(0); } 
+}
+.results-header { 
+    pointer-events: auto; /* 닫기 버튼은 클릭되어야 함 */
+    display: flex; justify-content: space-between; align-items: flex-start; 
+    background: rgba(17, 24, 39, 0.9); /* 헤더에만 반투명 검정 배경 */
+    backdrop-filter: blur(5px);
+    margin: 0 20px 12px 20px; 
+    padding: 14px 20px; 
+    border-radius: 16px;
+    box-shadow: 0 10px 20px rgba(0,0,0,0.15);
+}
+.results-card-slider { 
+    pointer-events: auto; /* 카드는 스와이프/클릭 되어야 함 */
+    display: flex; gap: 16px; overflow-x: auto; 
+    padding: 0 20px 10px 20px; 
+    scroll-snap-type: x mandatory; scrollbar-width: none; 
+}
+.results-card-slider::-webkit-scrollbar { display: none; }
+.result-card { 
+    background: white; border-radius: 20px; padding: 20px; 
+    min-width: 290px; flex-shrink: 0; scroll-snap-align: start; 
+    box-shadow: 0 10px 25px rgba(0,0,0,0.2); border: 2px solid transparent; 
+}
+.rc-top { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+.rc-rank { background: var(--text-main); color: white; width: 30px; height: 30px; border-radius: 50%; display: flex; justify-content: center; align-items: center; font-weight: 900; font-size: 15px; }
+.rc-title { font-size: 18px; font-weight: 800; color: var(--text-main); letter-spacing: -0.5px; }
+.rc-info-row { display: flex; justify-content: space-between; font-size: 13px; margin-bottom: 8px; align-items: center; }
+.rc-label { color: var(--text-sub); font-weight: 600; }
+.rc-value { color: var(--text-main); font-weight: 800; text-align: right; }
+.rc-btn { width: 100%; background: var(--bg-sub); border: 1px solid var(--border-color); padding: 14px; border-radius: 12px; margin-top: 16px; font-size: 14px; font-weight: 800; color: var(--text-main); cursor: pointer; transition: 0.2s; }
+.rc-btn:active { background: var(--text-main); color: white; border-color: var(--text-main); }
+
+/* AI CFO Phase 1 확장 그리드 */
+.cfo-phase1-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+}
+@media (max-width: 720px) {
+    .cfo-phase1-grid { grid-template-columns: 1fr !important; }
+    #cfo-walkable-box { grid-column: auto !important; }
+}
+/* =========================================================
+   🚀 [UI 업그레이드] 중앙 타겟 마커 -> 스카이블루 탐색(조사) 핀
+   ========================================================= */
+
+.map-crosshair {
+    position: absolute !important;
+    top: 50% !important;
+    left: 50% !important;
+    width: 48px !important;
+    height: 48px !important;
+    transform: translate(-50%, -100%) !important; 
+    z-index: 100 !important;
+    pointer-events: none !important; 
+    
+    background: transparent !important;
+    border: none !important;
+    
+    /* 💡 파란 거꾸로 된 원뿔(드롭)만 — 돋보기 제거 */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 384 512'%3E%3Cpath fill='%233B82F6' d='M172.268 501.67C26.97 291.031 0 269.413 0 192 0 85.961 85.961 0 192 0s192 85.961 192 192c0 77.413-26.97 99.031-172.268 309.67-9.535 13.774-29.93 13.773-39.464 0z'/%3E%3C/svg%3E") !important;
+    background-size: contain !important;
+    background-repeat: no-repeat !important;
+    background-position: center bottom !important;
+    
+    /* 둥둥 뜨는 애니메이션 */
+    animation: floatingPin 2s infinite ease-in-out !important;
+}
+
+/* 기존 십자가 라인 제거 */
+.map-crosshair::before {
+    display: none !important;
+}
+
+/* 🚀 디테일 끝판왕: 핀 아래에 생기는 그림자도 하늘색 톤으로 맞춤 */
+.map-crosshair::after {
+    content: '' !important;
+    display: block !important;
+    position: absolute !important;
+    bottom: -4px !important;
+    left: 50% !important;
+    width: 18px !important;
+    height: 6px !important;
+    background: rgba(59, 130, 246, 0.3) !important; /* 👈 하늘색 반투명 그림자 */
+    border-radius: 50% !important;
+    filter: blur(2px) !important;
+    z-index: -1 !important;
+    animation: shadowPulse 2s infinite ease-in-out !important;
+}
+
+/* 마커 위아래 바운스 효과 */
+@keyframes floatingPin {
+    0%, 100% { transform: translate(-50%, -100%) translateY(0); }
+    50% { transform: translate(-50%, -100%) translateY(-8px); }
+}
+
+/* 그림자 크기 변화 효과 */
+@keyframes shadowPulse {
+    0%, 100% { transform: translateX(-50%) scale(1); opacity: 0.8; }
+    50% { transform: translateX(-50%) scale(0.6); opacity: 0.3; }
+}

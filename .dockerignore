@@ -1,0 +1,30 @@
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+.git/
+.cursor/
+terminals/
+agent-transcripts/
+*.db
+*.sqlite
+.env
+.env.*
+
+# OSM 원본(수 GB) — Fly 이미지에 넣지 않음
+**/*.pbf
+**/*.PBF
+*.osm
+*.osm.bz2
+
+# 공공 xlsx 원본은 용량만 큼. 런타임에 쓰는 것만 예외
+data/*.xlsx
+!data/car2024.xlsx
+
+bluedot_walking_polygon.html
+docs/
+AUDIT_REPORT.md
+DATA_RELIABILITY_GUIDE.md
+OAUTH_SETUP.md
+DEPLOY.md
+

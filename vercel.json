@@ -1,0 +1,10 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "https://bluedot-backend-autumn-grass-4638.fly.dev/api/$1"
+    }
+  ]
+}
+

@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    
+    <meta name="color-scheme" content="light only">
+    <meta name="theme-color" content="#0f172a">
+    
+    <title>BLUEDOT - 스마트 개원 입지 분석 솔루션</title>
+    
+    <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
+    
+    <link rel="stylesheet" href="style.css">
+    <!-- 임시: 로그인 UI 숨김(분석 비로그인 우선). 복구 시 이 style 블록만 삭제하세요. -->
+    <style id="bluedot-login-paused">
+        #header-login-btn, #header-user-chip { display: none !important; }
+        #sidebar-login-prompt, #sidebar-logged-in, #sidebar-logout-li { display: none !important; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <script src="https://cdn.iamport.kr/v1/iamport.js"></script>
+    <script src="https://t1.kakaocdn.net/kakao_js_sdk/2.7.0/kakao.min.js" crossorigin="anonymous"></script>
+    <!-- 지도 SDK(sdk.js)는 app.js에서 동적으로 로드 — head에서 고정 순서로 넣으면 kakao 전역 충돌로 kakao.maps 가 사라질 수 있음 -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script>
+        /* 카카오 개발자 > 내 애플리케이션 > 앱 키 > JavaScript 키 (REST API 키는 지도에 쓰면 안 됨) */
+        window.KAKAO_JS_KEY = "a19675c29ae578ea85333417ff7f6fee";
+        window.GOOGLE_CLIENT_ID = "";
+        // 배포(Vercel)에서는 vercel.json rewrite로 /api/* 를 백엔드로 프록시합니다.
+        // 로컬: uvicorn 실행 후 브라우저에서 http://127.0.0.1:8000/ 로 여세요(file:// 지양).
+        window.BLUEDOT_API_BASE = "";
+        /* 임시: true면 로그인·크레딧 없이 바로 분석 (데모/개발용). 상용 전 false 권장 */
+        window.BLUEDOT_SKIP_CREDIT_CHECK = true;
+    </script>
+
+    <style>
+        /* 🚀 하단 아이콘 가림 방지 */
+        .dept-grid-fixed {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 10px;
+            max-height: 220px;
+            overflow-y: auto;
+            padding-bottom: 20px;
+            margin-bottom: 10px;
+        }
+        .dept-grid-fixed::-webkit-scrollbar { width: 4px; }
+        .dept-grid-fixed::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 4px; }
+
+        /* 🚀 AI 연산 로딩 애니메이션 */
+        #loading-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.85); z-index: 9999; flex-direction: column;
+            justify-content: center; align-items: center; backdrop-filter: blur(5px);
+        }
+        .spinner {
+            width: 60px; height: 60px; border: 5px solid rgba(255,255,255,0.2);
+            border-top: 5px solid #10B981; border-radius: 50%; animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* 🚀 우측 사이드바 (삼선 메뉴) 디자인 */
+        #sidebar-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); z-index: 8000; justify-content: flex-end;
+        }
+        .sidebar-content {
+            width: 280px; height: 100%; background: white; box-shadow: -5px 0 20px rgba(0,0,0,0.2);
+            animation: slideInRight 0.3s forwards; display: flex; flex-direction: column;
+        }
+        @keyframes slideInRight {
+            from { transform: translateX(100%); }
+            to { transform: translateX(0); }
+        }
+        @keyframes slideOutRight {
+            from { transform: translateX(0); }
+            to { transform: translateX(100%); }
+        }
+        .sidebar-header {
+            padding: 20px; border-bottom: 1px solid #e2e8f0; display: flex;
+            justify-content: space-between; align-items: center; background: #f8fafc;
+        }
+        .sidebar-header h2 { margin: 0; font-size: 18px; font-weight: 900; color: #0f172a; }
+        .sidebar-header button { background: none; border: none; font-size: 24px; cursor: pointer; color: #64748b; padding: 0; }
+        .sidebar-menu { list-style: none; padding: 0; margin: 0; flex: 1; overflow-y: auto; }
+        .sidebar-menu li {
+            padding: 18px 20px; border-bottom: 1px solid #f1f5f9; font-size: 15px;
+            font-weight: 700; color: #334155; cursor: pointer; transition: background 0.2s;
+            display: flex; align-items: center; gap: 12px;
+        }
+        .sidebar-menu li:hover { background: #f0fdf4; color: #10B981; }
+        .sidebar-footer {
+            padding: 20px; border-top: 1px solid #e2e8f0; font-size: 13px; color: #94a3b8; text-align: center;
+        }
+        
+        /* 🚀 A4 리포트 페이퍼 디자인 (PDF 뷰어 스타일) */
+        #report-modal {
+            background: #525659; overflow-y: auto; padding: 40px 20px; align-items: flex-start;
+            z-index: 9000;
+        }
+        .a4-paper {
+            width: 100%; max-width: 210mm; min-height: 297mm; margin: 0 auto;
+            background: white; box-shadow: 0 10px 30px rgba(0,0,0,0.5); padding: 20mm;
+            position: relative; color: #1e293b; font-family: 'Pretendard', sans-serif;
+        }
+        .report-section { margin-bottom: 24px; border-bottom: 1px solid #e2e8f0; padding-bottom: 20px; }
+        .report-title { font-size: 26px; font-weight: 900; color: #0f172a; border-bottom: 3px solid #0f172a; padding-bottom: 12px; margin-bottom: 24px; }
+        .data-source-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+        .data-source-item { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; font-size: 12px; }
+
+        /* 🖨️ PDF 인쇄 시 화면 최적화 */
+        @media (max-width: 720px) {
+            .report-radar-bep-grid,
+            .report-time-matrix-grid { grid-template-columns: 1fr !important; }
+        }
+        @media print {
+            body * { visibility: hidden; }
+            #report-modal, #report-modal * { visibility: visible; }
+            #report-modal {
+                position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+                background: white; padding: 0; margin: 0; overflow: visible;
+            }
+            .a4-paper { box-shadow: none; max-width: 100%; padding: 0; margin: 0; }
+            .no-print { display: none !important; }
+        }
+
+        /* 🚀 결과창 지도가림 방지 플로팅 CSS */
+        .results-panel { 
+            position: absolute !important; 
+            top: auto !important;
+            bottom: 20px !important; 
+            left: 0; 
+            width: 100%; 
+            z-index: 200; 
+            background: transparent !important; 
+            padding: 0 !important; 
+            pointer-events: none; 
+            animation: slideUpCard 0.4s cubic-bezier(0.16, 1, 0.3, 1) forwards !important; 
+            border-radius: 0 !important;
+            box-shadow: none !important;
+        }
+        @keyframes slideUpCard { 
+            from { transform: translateY(100%); } 
+            to { transform: translateY(0); } 
+        }
+        .results-header { 
+            pointer-events: auto; 
+            background: rgba(17, 24, 39, 0.9); 
+            backdrop-filter: blur(5px);
+            margin: 0 20px 12px 20px; 
+            padding: 14px 20px; 
+            border-radius: 16px;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.15);
+        }
+        .results-card-slider { 
+            pointer-events: auto; 
+            padding-bottom: 20px !important;
+        }
+        .result-card {
+            box-shadow: 0 10px 25px rgba(0,0,0,0.2) !important;
+        }
+
+        /* 말풍선 최상단 노출 보장용 CSS */
+        .kakao-info-window {
+            z-index: 300 !important;
+        }
+
+        /* 🚀 [NEW] 부동산 및 소비력 프리미엄 데이터 박스 스타일 */
+        .rc-premium-box {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 12px;
+            margin-top: 12px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .premium-item {
+            display: flex;
+            flex-direction: column;
+        }
+        .premium-label {
+            font-size: 11px;
+            color: #64748b;
+            font-weight: 700;
+            margin-bottom: 2px;
+        }
+        .premium-value {
+            font-size: 14px;
+            font-weight: 900;
+            color: #0f172a;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="loading-overlay">
+        <div class="spinner"></div>
+        <div style="color: white; margin-top: 24px; font-weight: 800; font-size: 18px; letter-spacing: -0.5px;">BLUEDOT AI가 수만 건의 데이터를 분석 중입니다...</div>
+        <div style="color: #94a3b8; margin-top: 8px; font-size: 13px;">(심평원 · 통계청 · 공공데이터 교차 검증 중)</div>
+    </div>
+
+    <div id="sidebar-overlay" onclick="closeSidebar(event)">
+        <div id="sidebar-panel" class="sidebar-content" onclick="event.stopPropagation()">
+            <div class="sidebar-header">
+                <h2>메뉴</h2>
+                <button onclick="closeSidebar(event)">✕</button>
+            </div>
+            <div id="sidebar-user-area" style="padding:16px 20px; border-bottom:1px solid #e2e8f0; background:#f8fafc;">
+                <div id="sidebar-login-prompt" style="display:none;">
+                    <div style="font-size:13px; color:#64748b; margin-bottom:10px;">로그인하면 분석 이력·결제 크레딧이 저장됩니다</div>
+                    <button onclick="openLoginModal()" style="width:100%; padding:10px; background:#FEE500; color:#191919; border:none; border-radius:8px; font-weight:800; cursor:pointer; margin-bottom:8px;">카카오로 로그인</button>
+                    <button onclick="loginGoogle()" style="width:100%; padding:10px; background:#fff; color:#333; border:1px solid #ddd; border-radius:8px; font-weight:700; cursor:pointer; margin-bottom:8px;">구글로 로그인</button>
+                    <button onclick="loginTest()" style="width:100%; padding:8px; background:#e2e8f0; color:#64748b; border:none; border-radius:6px; font-size:12px; cursor:pointer;">테스트 로그인</button>
+                </div>
+                <div id="sidebar-logged-in" style="display:none;">
+                    <div style="font-weight:800; color:#0f172a;" id="sidebar-user-name">사용자</div>
+                    <div style="font-size:12px; color:#10B981; margin-top:4px;">남은 분석 <span id="sidebar-user-credits">0</span>회</div>
+                </div>
+            </div>
+            <ul class="sidebar-menu">
+                <li onclick="handleMenuClick('내 분석 이력')">📊 <span>내 분석 이력 (마이페이지)</span></li>
+                <li onclick="handleMenuClick('결제 수단 관리')">💳 <span>결제 수단 관리</span></li>
+                <li onclick="handleMenuClick('환경 설정')">⚙️ <span>환경 설정</span></li>
+                <li onclick="handleMenuClick('고객 센터')">🎧 <span>고객 센터 문의</span></li>
+                <li id="sidebar-logout-li" onclick="logout()" style="color: #ef4444; border-top: 1px solid #e2e8f0; display:none;">🚪 <span>로그아웃</span></li>
+            </ul>
+            <div class="sidebar-footer">
+                BLUEDOT v2.0<br>ⓒ 2024 Medical Intelligence.
+            </div>
+        </div>
+    </div>
+
+    <div id="login-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-body" style="max-width:340px;">
+            <h3 style="font-size:18px; font-weight:800; margin-bottom:16px;">로그인</h3>
+            <p style="font-size:14px; color:#64748b; margin-bottom:20px;">로그인하면 분석 이력과 결제 크레딧이 기기에 저장됩니다.</p>
+            <button onclick="loginKakao()" style="width:100%; padding:14px; background:#FEE500; color:#191919; border:none; border-radius:10px; font-weight:800; cursor:pointer; margin-bottom:10px;">카카오로 로그인</button>
+            <button onclick="loginGoogle()" style="width:100%; padding:14px; background:#fff; border:1px solid #ddd; border-radius:10px; font-weight:700; cursor:pointer; margin-bottom:10px;">구글로 로그인</button>
+            <button onclick="loginTest(); closeLoginModal();" style="width:100%; padding:10px; background:#f1f5f9; color:#64748b; border:none; border-radius:8px; font-size:13px; cursor:pointer;">테스트 로그인</button>
+            <button onclick="closeLoginModal()" style="width:100%; margin-top:12px; padding:10px; background:#e2e8f0; border:none; border-radius:8px; cursor:pointer;">취소</button>
+        </div>
+    </div>
+
+    <div id="mypage-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-body" style="max-width:420px; max-height:80vh; overflow-y:auto;">
+            <h3 style="font-size:18px; font-weight:800; margin-bottom:16px;">📊 내 분석 이력</h3>
+            <div id="mypage-reports-list"></div>
+            <button onclick="closeMypageModal()" style="width:100%; margin-top:16px; padding:12px; background:#e2e8f0; border:none; border-radius:8px; cursor:pointer;">닫기</button>
+        </div>
+    </div>
+
+    <div id="payments-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-body" style="max-width:420px;">
+            <h3 style="font-size:18px; font-weight:800; margin-bottom:16px;">💳 결제·크레딧 현황</h3>
+            <div id="payments-content"></div>
+            <button onclick="closePaymentsModal()" style="width:100%; margin-top:16px; padding:12px; background:#e2e8f0; border:none; border-radius:8px; cursor:pointer;">닫기</button>
+        </div>
+    </div>
+
+    <div id="region-modal" class="modal-overlay" style="display:none;">
+        <div class="modal-body" style="max-width:420px; max-height:70vh; display:flex; flex-direction:column;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h3 style="font-size:18px; font-weight:800; margin:0;">지역 검색</h3>
+                <button type="button" onclick="closeRegionModal()" aria-label="닫기" style="background:none;border:none;font-size:22px;cursor:pointer;color:#64748b;line-height:1;">&times;</button>
+            </div>
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <input type="text" id="region-search-input" placeholder="주소 또는 장소를 입력하세요" style="flex:1; padding:12px; border:1px solid #e2e8f0; border-radius:8px; font-size:15px;" onkeypress="if(event.keyCode===13) executeRegionSearch()">
+                <button type="button" onclick="executeRegionSearch()" style="padding:12px 16px; background:#10B981; color:white; border:none; border-radius:8px; font-weight:700; cursor:pointer;">검색</button>
+            </div>
+            <div id="region-search-results" style="flex:1; overflow-y:auto; min-height:120px; border:1px solid #f1f5f9; border-radius:8px; padding:0 12px;"></div>
+            <button type="button" onclick="closeRegionModal()" style="width:100%; margin-top:12px; padding:12px; background:#e2e8f0; border:none; border-radius:8px; cursor:pointer;">닫기</button>
+        </div>
+    </div>
+
+    <div id="splash-screen">
+        <div class="splash-content">
+            <h1 class="splash-title">BLUEDOT</h1>
+            <p class="splash-sub">Medical Intelligence</p>
+        </div>
+    </div>
+
+    <div id="app">
+        <header class="top-bar">
+            <div class="top-bar-content">
+                <div class="app-logo" style="font-weight: 900; color: #0f172a;">🔵 BLUEDOT</div>
+                <div class="region-selector" onclick="openRegionModal()">
+                    <span id="current-region-text">위치 탐색 중...</span>
+                    <svg class="icon-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"></path></svg>
+                </div>
+                <div class="top-icons">
+                    <button id="header-login-btn" onclick="openLoginModal()" style="display:none; margin-right:8px; padding:6px 14px; background:#10B981; color:white; border:none; border-radius:8px; font-size:13px; font-weight:700; cursor:pointer;">로그인</button>
+                    <div id="header-user-chip" style="display:none; margin-right:8px; padding:6px 12px; background:#f0fdf4; color:#059669; border-radius:8px; font-size:13px; font-weight:700; cursor:pointer;" onclick="openSidebar()"></div>
+                    <div class="icon-btn noti-btn" onclick="alert('신규 상권 데이터가 1시간 전에 업데이트 되었습니다.')">
+                        <svg viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path></svg>
+                    </div>
+                    <div class="icon-btn menu-btn" onclick="openSidebar()">
+                        <svg viewBox="0 0 24 24"><line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line></svg>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="ai-search-box">
+            <svg viewBox="0 0 24 24" class="ai-sparkle"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
+            <input type="text" id="ai-search-input" placeholder="예: 소아과 개원할 신축 아파트 상권 찾아줘" onkeypress="if(event.keyCode==13) submitAISearch()">
+            <button class="ai-submit-btn" onclick="submitAISearch()">
+                <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" fill="none"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
+            </button>
+        </div>
+
+        <div id="results-panel" class="results-panel" style="display: none;">
+            <div class="results-header">
+                <div>
+                    <h2 style="color: white; font-size: 20px; font-weight: 800;">상위 추천 상권 (Top 5)</h2>
+                    <div style="color: #10B981; font-size: 11px; font-weight: 600; margin-top: 4px;">✔ 4대 공공데이터 교차 검증 완료</div>
+                </div>
+                <div style="color: white; cursor: pointer;" onclick="closeResults()">✕ 닫기</div>
+            </div>
+            <div class="results-card-slider" id="results-cards-container"></div>
+        </div>
+
+        <div class="map-crosshair"></div>
+        <div id="map"></div>
+        <div id="hover-loading-toast" style="display:none; position:fixed; bottom:140px; left:50%; transform:translateX(-50%); background:rgba(15,23,42,0.95); color:white; padding:10px 20px; border-radius:10px; font-size:13px; font-weight:700; z-index:200; box-shadow:0 4px 12px rgba(0,0,0,0.3); pointer-events:none;">경쟁기관 조회 중...</div>
+
+        <div class="map-controls">
+            <button class="ctrl-btn" onclick="zoomIn()" title="확대">+</button>
+            <button class="ctrl-btn" onclick="zoomOut()" title="축소">-</button>
+            <button class="ctrl-btn my-loc-btn" onclick="executeGPSLocation()" title="내 위치">
+                <svg viewBox="0 0 24 24"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>
+            </button>
+        </div>
+
+        <div class="bottom-sheet peek-mode" id="analysis-panel">
+            <div class="sheet-handle"></div>
+            <div class="sheet-content">
+                <div style="font-size:13px; color:var(--brand-primary); font-weight:800; text-align:center; margin-bottom:12px;" class="peek-hint">마우스를 올려 분석 과목을 선택하세요</div>
+                
+                <div class="dept-grid-fixed">
+                    <div class="dept-item dept-1" onclick="selectDepartment('내과', 1)"><div class="dept-icon">🩺</div><div class="dept-label">내과</div></div>
+                    <div class="dept-item dept-2" onclick="selectDepartment('피부과', 2)"><div class="dept-icon">✨</div><div class="dept-label">피부과</div></div>
+                    <div class="dept-item dept-3" onclick="selectDepartment('치과', 3)"><div class="dept-icon">🦷</div><div class="dept-label">치과</div></div>
+                    <div class="dept-item dept-4" onclick="selectDepartment('안과', 4)"><div class="dept-icon">👁️</div><div class="dept-label">안과</div></div>
+                    <div class="dept-item dept-5" onclick="selectDepartment('정형외과', 5)"><div class="dept-icon">🦴</div><div class="dept-label">정형외과</div></div>
+                    <div class="dept-item dept-6" onclick="selectDepartment('한의원', 6)"><div class="dept-icon">🌿</div><div class="dept-label">한의원</div></div>
+                    <div class="dept-item dept-7" onclick="selectDepartment('소아과', 7)"><div class="dept-icon">🧸</div><div class="dept-label">소아과</div></div>
+                    <div class="dept-item dept-8" onclick="selectDepartment('이비인후과', 8)"><div class="dept-icon">👂</div><div class="dept-label">이비인후과</div></div>
+                    <div class="dept-item dept-9" onclick="selectDepartment('산부인과', 9)"><div class="dept-icon">🤰</div><div class="dept-label">산부인과</div></div>
+                    <div class="dept-item dept-10" onclick="selectDepartment('정신건강의학과', 10)"><div class="dept-icon">🧠</div><div class="dept-label">정신과</div></div>
+                    <div class="dept-item dept-11" onclick="selectDepartment('약국', 11)"><div class="dept-icon">💊</div><div class="dept-label" style="color: #E02424;">약국</div></div>
+                    <div class="dept-item dept-12" onclick="selectDepartment('동물병원', 12)"><div class="dept-icon">🐶</div><div class="dept-label" style="color: #047857;">동물병원</div></div>
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                    <h2 class="analysis-title" id="analysis-title-text" style="margin:0;">진료과목을 선택하세요</h2>
+                    <select id="analysis-radius" class="input-field" style="width:110px; margin:0; padding:8px; font-weight:700; border-radius:10px;">
+                        <option value="1">반경 1km</option>
+                        <option value="3" selected>반경 3km</option>
+                        <option value="5">반경 5km</option>
+                    </select>
+                </div>
+
+                <button class="analyze-btn" id="analyze-submit-btn" style="display:none;" onclick="triggerPaymentFlow()">
+                    거시 상권 정밀 분석 (결제)
+                </button>
+            </div>
+        </div>
+
+        <div id="payment-modal" class="modal-overlay" style="display:none;">
+            <div class="modal-body payment-card" style="max-width:420px;">
+                <h3 style="font-size:18px; font-weight:800; margin-bottom:12px;">📊 B2B 정밀 컨설팅 리포트</h3>
+                <p style="font-size:14px; color:var(--text-sub); margin-bottom:16px; line-height: 1.5;">해당 권역 내 최적의 입지 <b>Top 5 노드 추출</b> 및 <b>A4 형식의 공식 컨설팅 보고서</b>를 제공합니다.</p>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:20px;">
+                    <div class="payment-plan-card" data-plan="1" onclick="selectPaymentPlan('1')" style="border:2px solid #e2e8f0; border-radius:12px; padding:18px; cursor:pointer; text-align:center; transition:all 0.2s;">
+                        <div style="font-size:13px; color:var(--text-sub); margin-bottom:6px;">1회 분석</div>
+                        <div style="font-size:22px; font-weight:900; color:#10B981;">7,000원</div>
+                        <div style="font-size:12px; color:#94a3b8; margin-top:6px;">커피 한 잔 값으로<br>원하는 지역 상권 분석</div>
+                    </div>
+                    <div class="payment-plan-card" data-plan="5" onclick="selectPaymentPlan('5')" style="border:2px solid #e2e8f0; border-radius:12px; padding:18px; cursor:pointer; text-align:center; transition:all 0.2s;">
+                        <div style="font-size:13px; color:var(--text-sub); margin-bottom:6px;">5회 분석</div>
+                        <div style="font-size:22px; font-weight:900; color:#6366f1;">30,000원</div>
+                        <div style="font-size:12px; color:#94a3b8; margin-top:6px;">1회당 6,000원<br>4회 추가 무료</div>
+                    </div>
+                </div>
+                <input type="hidden" id="payment-selected-plan" value="">
+                <div style="display:flex; gap:10px;">
+                    <button class="btn-primary" style="background:#E5E7EB; color:#333; flex:1;" onclick="closePaymentModal()">취소</button>
+                    <button class="btn-primary" id="payment-submit-btn" style="flex:2; background:#0f172a;" onclick="processPayment()" disabled>결제 및 리포트 발급</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="report-modal" class="modal-overlay" style="display:none;">
+            <div class="a4-paper" id="a4-document">
+                <div class="no-print" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px dashed #cbd5e1;">
+                    <div style="font-size: 13px; color: #64748b; font-weight: 700;">※ 본 보고서는 A4 출력에 최적화되어 있습니다.</div>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        <button onclick="window.print()" style="padding: 10px 16px; background: #0f172a; color: white; border: none; border-radius: 6px; font-weight: 800; cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
+                            PDF 저장 / 인쇄
+                        </button>
+                        <button id="report-save-btn" onclick="saveCurrentReport()" style="display:none; padding: 10px 16px; background: #10B981; color: white; border: none; border-radius: 6px; font-weight: 800; cursor: pointer;">리포트 저장</button>
+                        <button onclick="closeReportModal()" style="padding: 10px 16px; background: #e2e8f0; color: #1e293b; border: none; border-radius: 6px; font-weight: 800; cursor: pointer;">닫기</button>
+                    </div>
+                </div>
+
+                <div class="report-title">
+                    <div style="font-size: 14px; font-weight: 800; color: #10B981; margin-bottom: 4px;">BLUEDOT Medical Intelligence</div>
+                    개원 입지 타당성 정밀 분석 리포트
+                </div>
+
+                <!-- 자동차보험 진료건수 (car2024.xlsx) 전국 대비 · 시군구 순위 -->
+                <div id="report-car-insurance-banner" class="report-section" style="display: none; margin-top: 12px; margin-bottom: 8px; padding: 16px 18px; border-radius: 12px; border: 2px solid #0ea5e9; background: linear-gradient(135deg, #ecfeff 0%, #f0f9ff 100%);">
+                    <div style="font-size: 11px; font-weight: 800; color: #0369a1; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px;">🚗 자동차보험 진료건수 · 시·군·구 단위 전국 비교</div>
+                    <div id="report-car-insurance-text" style="font-size: 14px; font-weight: 700; line-height: 1.65; color: #0c4a6e;"></div>
+                </div>
+
+                <!-- Phase 2: 도보 폴리곤 적용 상태 -->
+                <div id="report-phase2-badge" class="report-section" style="display:none; margin-top: 6px; margin-bottom: 8px; padding: 12px 14px; border-radius: 12px; border: 1px solid #e2e8f0; background: #ffffff;">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+                        <div style="display:flex; align-items:center; gap:8px;">
+                            <span id="report-phase2-chip" style="display:inline-block; padding:3px 10px; border-radius:999px; font-size:11px; font-weight:900; background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;">PHASE 2</span>
+                            <span id="report-phase2-text" style="font-size:13px; font-weight:800; color:#0f172a;"></span>
+                        </div>
+                        <div id="report-phase2-persona" style="font-size:12px; font-weight:800; color:#334155;"></div>
+                    </div>
+                    <div id="report-phase2-warning" style="display:none; margin-top:8px; font-size:12px; font-weight:700; color:#b45309; line-height:1.5;"></div>
+                </div>
+
+                <div class="report-section" style="display: flex; justify-content: space-between; align-items: flex-end;">
+                    <div>
+                        <div style="font-size: 14px; font-weight: 700; color: #64748b; margin-bottom: 4px;" id="report-dept-badge">분석 과목</div>
+                        <h2 style="font-size: 22px; font-weight: 900; margin: 0;" id="report-region-title">대상지 이름</h2>
+                    </div>
+                    <div style="text-align: right;">
+                        <div style="font-size: 12px; font-weight: 700; color: #64748b;">AI 최종 평가 등급 (10점 만점)</div>
+                        <div id="report-final-score" style="font-size: 36px; font-weight: 900; color: #0f172a; line-height: 1;">0.0<span style="font-size: 18px;">점</span></div>
+                    </div>
+                </div>
+
+                <!-- 🚀 B2B: 상권 밸런스(레이더) + 손익분기(BEP) -->
+                <div class="report-section" id="report-consulting-premium">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #6366f1; padding-left: 8px;">📐 상권 밸런스 &amp; CFO 손익분기 시뮬레이션</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: stretch;" class="report-radar-bep-grid">
+                        <div style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; background: linear-gradient(180deg, #fafafa 0%, #fff 100%);">
+                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 8px; color: #475569; text-align: center;">6각 상권 밸런스 (10점 만점 정규화)</div>
+                            <div style="height: 260px; position: relative;">
+                                <canvas id="radarBalanceChart"></canvas>
+                            </div>
+                            <div style="font-size: 10px; color: #94a3b8; text-align: center; margin-top: 4px;">※ V8: KOSIS·SGIS·TASIS 실데이터로 치환 예정</div>
+                        </div>
+                        <div style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; background: #fafafa;">
+                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 12px; color: #0f172a;">💼 손익분기점(BEP) 추정</div>
+                            <div id="bep-simulation-box" style="font-size: 13px; line-height: 1.65; color: #334155;">
+                                <p style="color:#94a3b8;">분석 데이터를 불러오는 중입니다…</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Phase 1: AI CFO 확장 (직원 BEP · 생존율 · 임대 리스크 · 페르소나 · 도보 반경) -->
+                <div class="report-section" id="report-cfo-phase1-section">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #0f172a; padding-left: 8px;">🧮 AI CFO 생존 견적 (확장)</h3>
+                    <p style="font-size: 12px; color: #64748b; margin-bottom: 12px;">의사 1명·직원 4명 기준 손익분기, 상권 생존 지표, 임대 리스크, 페르소나, 도보 10분 추정 반경을 실시간 산출합니다.</p>
+                    <div id="cfo-phase1-loading" style="padding: 20px; text-align: center; color: #64748b; font-weight: 600; background: #f8fafc; border-radius: 12px; border: 1px dashed #cbd5e1;">
+                        AI CFO 데이터를 불러오는 중…
+                    </div>
+                    <div id="cfo-phase1-content" class="cfo-phase1-grid" style="display: none;">
+                        <div id="cfo-staff-bep-box" style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; background: #fff;"></div>
+                        <div id="cfo-survival-box" style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; background: #f0fdf4;"></div>
+                        <div id="cfo-rent-risk-box" style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; background: #fffbeb;"></div>
+                        <div id="cfo-persona-box" style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; background: #faf5ff;"></div>
+                        <div id="cfo-walkable-box" style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 14px; background: #eff6ff; grid-column: 1 / -1;"></div>
+                    </div>
+                    <p id="cfo-phase1-error" style="display: none; font-size: 12px; color: #b91c1c; margin-top: 8px;"></p>
+                </div>
+
+                <div class="report-section">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #10B981; padding-left: 8px;">💡 AI 컨설팅 종합 의견</h3>
+                    <div style="background: #f8fafc; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; font-size: 15px; font-weight: 700; line-height: 1.6; color: #1e293b;" id="report-insight-text">
+                        분석 의견이 이곳에 출력됩니다.
+                    </div>
+                </div>
+
+                <!-- Phase 3: Time-Matrix & 진료시간 컨설팅 -->
+                <div class="report-section" id="report-time-matrix-section">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #ea580c; padding-left: 8px;">⏰ 요일별 유동인구 &amp; 진료시간 컨설팅</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;" class="report-time-matrix-grid">
+                        <div style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; background: white;">
+                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 8px; color: #475569;">요일별 유동인구 지수</div>
+                            <div style="height: 200px;">
+                                <canvas id="timeMatrixChart"></canvas>
+                            </div>
+                            <div style="font-size: 10px; color: #94a3b8; margin-top: 4px;">※ V8: 통신사 유동인구 실데이터 연동 예정</div>
+                        </div>
+                        <div style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; background: #fffbeb;">
+                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 8px; color: #0f172a;">🕒 추천 진료시간</div>
+                            <div id="hours-consulting-box" style="font-size: 14px; line-height: 1.7; color: #334155; font-weight: 600;"></div>
+                            <div id="time-matrix-killer-peak" style="display: none; margin-top: 12px; padding: 12px; border-radius: 10px; background: linear-gradient(90deg, #fff7ed 0%, #ffedd5 100%); border: 1px solid #fdba74; font-size: 12px; font-weight: 700; color: #9a3412; line-height: 1.55;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="report-section" id="report-killer-insights-section">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #dc2626; padding-left: 8px;">🎯 킬러 인사이트 (경쟁 노후도 · 리뷰 · 주차·인프라)</h3>
+                    <p style="font-size: 12px; color: #64748b; margin-bottom: 12px;">지방행정 인허가·플레이스·공영주차장·통신/생활인구 연동 시 정밀화됩니다. 현재는 마스터·HIRA 기반 추정치입니다.</p>
+                    <div id="killer-insights-box" style="display: grid; gap: 12px;"></div>
+                </div>
+
+                <div class="report-section" id="report-building-aging-section">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #0ea5e9; padding-left: 8px;">🏢 경쟁 병원 건물 노후화 분석</h3>
+                    <p style="font-size: 12px; color: #64748b; margin-bottom: 12px;">건축물대장(건축HUB) 기반으로 연식·엘리베이터·주차를 종합합니다. 지번 코드(법정동코드 등)가 부족하면 일부 기관은 '데이터 없음'으로 처리됩니다.</p>
+                    <div id="building-aging-box" style="display: grid; gap: 12px;"></div>
+                </div>
+
+                <div class="report-section">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #8b5cf6; padding-left: 8px;">📊 상권 시각화 분석 (Chart)</h3>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; text-align: center; background: white;">
+                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 12px; color: #475569;">타겟 연령층 분포 (추정)</div>
+                            <div style="height: 180px; position: relative;">
+                                <canvas id="demographicChart"></canvas>
+                            </div>
+                        </div>
+                        <div style="border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; text-align: center; background: white;">
+                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 12px; color: #475569;">주변 경쟁 의원 추정 매출 비교</div>
+                            <div style="height: 180px; position: relative;">
+                                <canvas id="revenueChart"></canvas>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="report-section">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #3b82f6; padding-left: 8px;">📈 세부 평가 산출 근거 (White-box Algorithm)</h3>
+                    <div style="font-size: 13px; color: #64748b; margin-bottom: 12px;">본 평가 점수는 아래 4가지 핵심 지표의 가중합산 후 리스크를 차감하여 산출되었습니다.</div>
+                    <div style="background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px;">
+                        <div id="report-formula-breakdown" style="display: flex; flex-direction: column; gap: 12px; font-size: 14px; font-weight: 600;">
+                            </div>
+                    </div>
+                </div>
+
+                <div class="report-section" style="border-bottom: none; display: none;">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #0f172a; padding-left: 8px;">📌 검증된 4대 공공데이터 출처</h3>
+                    <div class="data-source-grid">
+                        <div class="data-source-item">
+                            <strong style="color: #0f172a; display: block; margin-bottom: 4px;">① 통계청 SGIS 인구 데이터</strong>
+                            해당 권역 내 총 배후 세대 및 특정 연령층(영유아, 2030, 고령층 등) 비중 타겟 매핑 연산
+                        </div>
+                        <div class="data-source-item">
+                            <strong style="color: #0f172a; display: block; margin-bottom: 4px;">② 심사평가원 HIRA 의료정보</strong>
+                            반경 내 동일 과목 경쟁 의원 수 및 인구 1만명 당 전문의 밀집도(포화도) 산출
+                        </div>
+                        <div class="data-source-item">
+                            <strong style="color: #0f172a; display: block; margin-bottom: 4px;">③ 공공데이터포털 대중교통</strong>
+                            반경 내 지하철역 및 버스 정류장 GPS 좌표 기반 유동인구 접근성 평가
+                        </div>
+                        <div class="data-source-item">
+                            <strong style="color: #0f172a; display: block; margin-bottom: 4px;">④ 소상공인진흥공단 상권정보</strong>
+                            해당 상권의 구매력(객단가) 및 스타벅스 등 핵심 앵커 테넌트 유무 교차 검증
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Phase 3: Risk Warning (상권 진입 Check Point) -->
+                <div class="report-section" id="report-risk-warnings-section" style="border: 2px solid #fecaca; border-radius: 12px; background: linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%); padding: 20px;">
+                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; color: #b91c1c; display: flex; align-items: center; gap: 8px;">
+                        <span>⚠️</span> 상권 진입 Check Point
+                    </h3>
+                    <div id="risk-warnings-box" style="font-size: 14px; line-height: 1.8; color: #7f1d1d; font-weight: 600;"></div>
+                </div>
+
+                <div style="margin-top: 40px; text-align: center; font-size: 11px; color: #94a3b8; border-top: 1px solid #e2e8f0; padding-top: 16px;">
+                    본 분석 리포트는 공공데이터 기반 AI 추정치이므로, 최종 개원 결정 시 현장 임장 및 건물 실사를 권장합니다.<br>
+                    <strong>Generated by BLUEDOT Medical Intelligence</strong>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script src="auth.js"></script>
+    <script src="app.js"></script>
+    <script>
+        // =========================================================
+        // 🚀 1. GPS 기반 내 위치 자동 설정 및 주소 변환 로직
+        // =========================================================
+        function updateRegionTextByCoords(lat, lng) {
+            if (typeof kakao === 'undefined' || !kakao.maps.services) return;
+            var geocoder = new kakao.maps.services.Geocoder();
+            geocoder.coord2RegionCode(lng, lat, function(result, status) {
+                if (status === kakao.maps.services.Status.OK) {
+                    for(var i = 0; i < result.length; i++) {
+                        if(result[i].region_type === 'H') { // 행정동 기준
+                            document.getElementById('current-region-text').innerText = result[i].address_name;
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        function executeGPSLocation() {
+            if (navigator.geolocation) {
+                document.getElementById('current-region-text').innerText = "위치 탐색 중...";
+                navigator.geolocation.getCurrentPosition(
+                    function(position) {
+                        var lat = position.coords.latitude;
+                        var lng = position.coords.longitude;
+                        if (typeof map !== 'undefined') {
+                            var locPosition = new kakao.maps.LatLng(lat, lng);
+                            map.setCenter(locPosition);
+                            updateRegionTextByCoords(lat, lng);
+                        }
+                    }, 
+                    function(error) {
+                        console.warn("GPS 권한 거부 또는 실패. 기본 위치를 유지합니다.");
+                        document.getElementById('current-region-text').innerText = "위치 권한 필요";
+                    },
+                    { enableHighAccuracy: false, timeout: 5000 }
+                );
+            } else {
+                document.getElementById('current-region-text').innerText = "GPS 미지원 브라우저";
+            }
+        }
+
+        // 페이지 로드 완료 후 app.js가 지도를 다 그리면 GPS를 켭니다.
+        window.addEventListener('load', function() {
+            // 카카오맵 렌더링 시간을 주기 위해 0.5초 딜레이
+            setTimeout(executeGPSLocation, 500); 
+        });
+
+        const originalSubmit = window.submitAISearch;
+        window.submitAISearch = function() {
+            if(originalSubmit) originalSubmit();
+        };
+
+        // processPayment, triggerPaymentFlow, selectPaymentPlan, closePaymentModal → app.js에 정의됨
+
+        // =========================================================
+        // 🚀 3. 사이드바 (삼선 메뉴) 동작 로직
+        // =========================================================
+        function openSidebar() {
+            document.getElementById('sidebar-overlay').style.display = 'flex';
+            const panel = document.getElementById('sidebar-panel');
+            panel.style.animation = 'slideInRight 0.3s forwards';
+            fetchMe().then(me => onAuthStateChange(me.logged_in && me.user ? me.user : null)).catch(() => onAuthStateChange(null));
+        }
+
+        function closeSidebar(event) {
+            if (event && event.target !== event.currentTarget && event.target.tagName !== 'BUTTON') return;
+            const panel = document.getElementById('sidebar-panel');
+            panel.style.animation = 'slideOutRight 0.3s forwards';
+            setTimeout(() => {
+                document.getElementById('sidebar-overlay').style.display = 'none';
+            }, 280); 
+        }
+
+        function openLoginModal() { document.getElementById('login-modal').style.display = 'flex'; }
+        function closeLoginModal() { document.getElementById('login-modal').style.display = 'none'; }
+        function closeMypageModal() { document.getElementById('mypage-modal').style.display = 'none'; }
+        function closePaymentsModal() { document.getElementById('payments-modal').style.display = 'none'; }
+        function handleMenuClick(menuName) {
+            if (menuName === '내 분석 이력') { openMypageModal(); loadMypageReports(); }
+            else if (menuName === '결제 수단 관리') { openPaymentsModal(); loadPayments(); }
+            else if (menuName === '환경 설정') { alert('환경 설정 기능은 준비 중입니다.'); }
+            else if (menuName === '고객 센터') { alert('고객센터: support@bluedot.example.com'); }
+        }
+        function openMypageModal() { document.getElementById('mypage-modal').style.display = 'flex'; }
+        function openPaymentsModal() { document.getElementById('payments-modal').style.display = 'flex'; }
+        async function loadMypageReports() {
+            const list = document.getElementById('mypage-reports-list');
+            list.innerHTML = '<p style="text-align:center; color:#94a3b8;">로딩 중...</p>';
+            const reports = await fetchReports();
+            if (!reports || reports.length === 0) {
+                list.innerHTML = '<p style="text-align:center; color:#94a3b8; padding:24px;">저장된 분석 이력이 없습니다.<br>로그인 후 리포트를 저장해 보세요.</p>';
+                return;
+            }
+            list.innerHTML = reports.map(r => `
+                <div style="padding:14px; border:1px solid #e2e8f0; border-radius:10px; margin-bottom:10px; cursor:pointer;" onclick="viewSavedReport(${r.id})">
+                    <div style="font-weight:700; color:#0f172a;">${r.region_name || '상권'} · ${r.dept_name || ''}</div>
+                    <div style="font-size:12px; color:#94a3b8; margin-top:4px;">${(r.created_at || '').slice(0,16).replace('T',' ')}</div>
+                </div>
+            `).join('');
+        }
+        async function loadPayments() {
+            const el = document.getElementById('payments-content');
+            el.innerHTML = '<p style="text-align:center; color:#94a3b8;">로딩 중...</p>';
+            let me = {}, payments = [];
+            try { me = await fetchMe(); payments = await fetchPayments(); } catch (e) { me = {}; payments = []; }
+            let html = '';
+            if (me.logged_in) {
+                html += `<div style="background:#e0f2fe; padding:16px; border-radius:10px; margin-bottom:16px;"><strong>남은 분석</strong> <span style="color:#0369a1; font-size:20px;">${me.user.credits || 0}</span>회</div>`;
+            }
+            if (payments && payments.length > 0) {
+                html += '<div style="font-size:14px;"><strong>결제 이력</strong></div>';
+                html += payments.slice(0, 10).map(p => `
+                    <div style="padding:10px 0; border-bottom:1px solid #f1f5f9; font-size:13px;">
+                        ${(p.created_at||'').slice(0,10)} · ${(p.amount||0).toLocaleString()}원 · +${p.credits_added||0}회
+                    </div>
+                `).join('');
+            } else if (me.logged_in) {
+                html += '<p style="color:#94a3b8; margin-top:12px;">결제 이력이 없습니다.</p>';
+            } else {
+                html = '<p style="text-align:center; color:#94a3b8;">로그인 후 결제 현황을 확인할 수 있습니다.</p>';
+            }
+            el.innerHTML = html;
+        }
+        async function viewSavedReport(id) {
+            const r = await fetchReport(id);
+            if (!r || !r.report_data) { alert('리포트를 불러올 수 없습니다.'); return; }
+            closeMypageModal();
+            if (typeof renderReportFromData === 'function') renderReportFromData(r.report_data);
+        }
+        window.onAuthStateChange = function(user) {
+            const prompt = document.getElementById('sidebar-login-prompt');
+            const logged = document.getElementById('sidebar-logged-in');
+            const logoutLi = document.getElementById('sidebar-logout-li');
+            const headerLogin = document.getElementById('header-login-btn');
+            const headerUser = document.getElementById('header-user-chip');
+            if (user) {
+                if (prompt) prompt.style.display = 'none';
+                if (logged) { logged.style.display = 'block'; document.getElementById('sidebar-user-name').innerText = user.name || '사용자'; document.getElementById('sidebar-user-credits').innerText = user.credits || 0; }
+                if (logoutLi) logoutLi.style.display = 'flex';
+                if (headerLogin) headerLogin.style.display = 'none';
+                if (headerUser) { headerUser.style.display = 'inline-flex'; headerUser.textContent = (user.name || '사용자') + ' ' + (user.credits || 0) + '회'; }
+                if (typeof syncCreditsFromServer === 'function') syncCreditsFromServer(user.credits);
+            } else {
+                if (prompt) prompt.style.display = 'block';
+                if (logged) logged.style.display = 'none';
+                if (logoutLi) logoutLi.style.display = 'none';
+                if (headerLogin) headerLogin.style.display = 'inline-block';
+                if (headerUser) headerUser.style.display = 'none';
+            }
+        };
+        window.addEventListener('load', function() {
+            if (window.KAKAO_JS_KEY && typeof Kakao !== 'undefined') try { Kakao.init(window.KAKAO_JS_KEY); } catch(e){}
+            fetchMe().then(me => onAuthStateChange(me.logged_in && me.user ? me.user : null)).catch(() => onAuthStateChange(null));
+        });
+    </script>
+</body>
+</html>
