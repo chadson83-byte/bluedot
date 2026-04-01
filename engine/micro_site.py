@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-미시 입지: 6축 프롭테크 스코어(유동·가시성·배후주거·앵커·메디컬·주차) + 카카오 앵커·심평원·마스터 CSV.
-격자 유동인구·횡단보도·아파트 정문·주차장 등은 프록시/미연동 구간은 scoring_meta.notes 에 명시.
+미시 입지: 6축 프롭테크 스코어 + 카카오·(선택)네이버 로컬 병합 POI·심평원·마스터 CSV.
+네이버: openapi.naver.com/v1/search/local (Client ID/Secret). 미설정 시 카카오만 사용.
+2단계: 학교·아파트·공원은 카카오 키워드 거리로 부지 프록시(실지적 폴리곤은 추후 GIS).
 """
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -58,6 +60,136 @@ def _count_hospitals_within(lat: float, lng: float, radius_m: float, hospitals: 
     return n
 
 
+# 2단계: GIS 폴리곤 없이 카카오 키워드로 학교·단지·공원 프록시 (실폴리곤 마스킹은 추후 브이월드/OSM)
+LAND_USE_KAKAO_QUERIES: List[Tuple[str, str]] = [
+    ("초등학교", "school"),
+    ("중학교", "school"),
+    ("고등학교", "school"),
+    ("유치원", "school"),
+    ("아파트", "apartment"),
+    ("공원", "park"),
+]
+
+
+def collect_land_use_hazard_pois(
+    *,
+    kakao_key: str,
+    lat: float,
+    lng: float,
+    radius_m: int = 1200,
+) -> List[Dict[str, Any]]:
+    """권역 중심 기준 학교·아파트·공원 후보 좌표(중복 제거). 폴리곤 대체 프록시."""
+    if not (kakao_key or "").strip():
+        return []
+    merged: Dict[str, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(LAND_USE_KAKAO_QUERIES))) as ex:
+        futs: Dict[Any, Tuple[str, str]] = {}
+        for q, kind in LAND_USE_KAKAO_QUERIES:
+            fut = ex.submit(
+                kakao_keyword_search,
+                kakao_key=kakao_key,
+                lat=lat,
+                lng=lng,
+                radius_m=radius_m,
+                query=q,
+            )
+            futs[fut] = (q, kind)
+        for fut in as_completed(futs):
+            q, kind = futs[fut]
+            try:
+                rows = fut.result()
+            except Exception as e:
+                logging.warning("land_use hazard %s: %s", q, e)
+                continue
+            for row in rows or []:
+                key = str(row.get("id") or "").strip()
+                if not key:
+                    try:
+                        key = f"{float(row.get('lat') or 0):.5f},{float(row.get('lng') or 0):.5f}"
+                    except (TypeError, ValueError):
+                        key = ""
+                if not key or key in merged:
+                    continue
+                merged[key] = {**row, "hazard_kind": kind}
+    return list(merged.values())
+
+
+def evaluate_land_use_for_candidate(
+    lat: float,
+    lng: float,
+    hazards: List[Dict[str, Any]],
+    anchor_poi_count_100m: int,
+    anchor_poi_count_300m: int,
+) -> Dict[str, Any]:
+    """
+    하드 제외: 학교 부지·공원 부지 인접, (상업앵커 부족 시) 아파트 단지 심부 프록시.
+    이면도로: 100m 내 앵커 0이면서 300m 내 앵커 다수 → 골목·단지내부 프록시 50% 감점.
+    """
+    min_s = min_a = min_p = None
+    for h in hazards or []:
+        try:
+            plat = float(h.get("lat"))
+            plng = float(h.get("lng"))
+        except (TypeError, ValueError):
+            continue
+        d = haversine_m(lat, lng, plat, plng)
+        k = str(h.get("hazard_kind") or "")
+        if k == "school":
+            min_s = d if min_s is None else min(min_s, d)
+        elif k == "apartment":
+            min_a = d if min_a is None else min(min_a, d)
+        elif k == "park":
+            min_p = d if min_p is None else min(min_p, d)
+
+    reasons: List[str] = []
+    hard = False
+    # 학교: 교정 내부 후보 차단 (상업앵커와 무관하게 강하게)
+    if min_s is not None and min_s < 118.0:
+        hard = True
+        reasons.append(f"학교·교육시설 인접 약 {int(min_s)}m (부지내부 후보 제외)")
+    # 공원: 시설부지 인접 + 근처에 상업앵커 거의 없을 때만 하드
+    if (
+        not hard
+        and min_p is not None
+        and min_p < 58.0
+        and anchor_poi_count_100m < 1
+    ):
+        hard = True
+        reasons.append(f"공원부지 인접 약 {int(min_p)}m (제외)")
+    # 아파트: 대로변 상가(100m 앵커 2+)는 오탐 완화
+    if (
+        not hard
+        and min_a is not None
+        and min_a < 92.0
+        and anchor_poi_count_100m < 2
+    ):
+        hard = True
+        reasons.append(f"아파트단지 인접 약 {int(min_a)}m (상업전면 부족 시 제외)")
+
+    mult = 1.0
+    if not hard and min_a is not None and min_a < 220.0 and anchor_poi_count_100m < 2:
+        # 단지 경계~중거리: 완만 감점
+        mult *= max(0.5, 0.42 + min_a / 520.0)
+        reasons.append("아파트단지 중거리(상업전면 약할 때 감점)")
+
+    # 이면도로·단지내부 프록시 (도로폭 미연동): 100m 무앵커 + 300m 다앵커 = 띠 상권 바깥
+    if anchor_poi_count_100m == 0 and anchor_poi_count_300m >= 5:
+        mult *= 0.5
+        reasons.append("100m무앵커·300m앵커다수 → 이면·단지내부 프록시(50%감점)")
+    elif anchor_poi_count_100m == 0 and anchor_poi_count_300m <= 1:
+        mult *= 0.72
+        reasons.append("근접 상업앵커 부족(72% 프록시)")
+
+    return {
+        "hard_exclude": hard,
+        "score_mult": max(0.08, min(1.0, mult)),
+        "reasons": reasons,
+        "min_dist_school_m": min_s,
+        "min_dist_apartment_m": min_a,
+        "min_dist_park_m": min_p,
+    }
+
+
 def candidate_offsets_9(center_lat: float, center_lng: float, offset_m: float = 125.0) -> List[Tuple[float, float, float, str]]:
     """
     (lat, lng, dist_m, dir_ko) — 중심 1 + 8방향 offset_m.
@@ -93,14 +225,38 @@ def build_region_candidate_scores(
     df_master: Any,
     resolve_master_ctx: Callable[..., Any],
     offset_m: float = 125.0,
+    kakao_key: str = "",
+    naver_client_id: str = "",
+    naver_client_secret: str = "",
 ) -> List[Dict[str, Any]]:
-    """한 권역(1차 노드) 내 9개 후보 좌표에 대해 앵커·경쟁·마스터 기반 미시 점수(카카오 재호출 없음)."""
+    """한 권역(1차 노드) 내 9개 후보 좌표에 대해 앵커·경쟁·마스터·토지용도·은행·마트 기반 미시 점수."""
+    hazards = collect_land_use_hazard_pois(
+        kakao_key=kakao_key,
+        lat=center_lat,
+        lng=center_lng,
+        radius_m=min(2000, max(900, int(eval_radius_m) * 3 + 400)),
+    )
+    rf_radius = min(2000, max(900, int(eval_radius_m) * 3 + 500))
+    bank_places, mart_places, rf_meta = collect_retail_finance_pois(
+        kakao_key=kakao_key,
+        naver_client_id=naver_client_id,
+        naver_client_secret=naver_client_secret,
+        lat=center_lat,
+        lng=center_lng,
+        radius_m=rf_radius,
+    )
     out: List[Dict[str, Any]] = []
     for la, ln, dist_m, dir_label in candidate_offsets_9(center_lat, center_lng, offset_m=offset_m):
         n_a = _count_anchors_within(la, ln, float(eval_radius_m), anchors)
         n_c = _count_hospitals_within(la, ln, float(eval_radius_m), hospitals)
         n_a_100 = _count_anchors_within(la, ln, 100.0, anchors)
+        n_a_300 = _count_anchors_within(la, ln, 300.0, anchors)
         n_c_100 = _count_hospitals_within(la, ln, 100.0, hospitals)
+        land_use = evaluate_land_use_for_candidate(
+            la, ln, hazards, n_a_100, n_a_300
+        )
+        n_bank_150 = _count_retail_within(la, ln, 150.0, bank_places)
+        n_mart_300 = _count_retail_within(la, ln, 300.0, mart_places)
         ctx = None
         if df_master is not None and hasattr(df_master, "empty") and not df_master.empty:
             try:
@@ -136,11 +292,17 @@ def build_region_candidate_scores(
             offset_dir=dir_label,
             offset_m=dist_m,
             anchor_poi_count_100m=n_a_100,
+            anchor_poi_count_300m=n_a_300,
             medical_facility_count_100m=n_c_100,
             master_activity_index=act,
             young_ratio=young,
             master_total_pop=mpop,
             bus_stop_count=bsc,
+            land_use_hard_exclude=bool(land_use.get("hard_exclude")),
+            land_use_mult=float(land_use.get("score_mult") or 1.0),
+            land_use_reasons=list(land_use.get("reasons") or []),
+            bank_poi_count_150m=n_bank_150,
+            mart_poi_count_300m=n_mart_300,
         )
         pname = (parent_name or "").strip() or "권역"
         pr = int(parent_rank) if parent_rank else 0
@@ -160,7 +322,12 @@ def build_region_candidate_scores(
             "competitor_count": n_c,
             "anchor_poi_count": n_a,
             "anchor_poi_count_100m": n_a_100,
+            "anchor_poi_count_300m": n_a_300,
             "medical_facility_count_100m": n_c_100,
+            "land_use_screening": land_use,
+            "retail_finance_meta": rf_meta,
+            "bank_poi_count_150m": n_bank_150,
+            "mart_poi_count_300m": n_mart_300,
             "scoring": sc,
             "region_proxy": {
                 "name": ctx.get("region_name") if ctx else None,
@@ -229,17 +396,28 @@ def dedupe_pick_top(
     min_sep_m: float = 55.0,
 ) -> List[Dict[str, Any]]:
     ranked = sorted(candidates, key=lambda c: float((c.get("scoring") or {}).get("score") or 0), reverse=True)
-    picked: List[Dict[str, Any]] = []
-    for c in ranked:
-        la = float(c["lat"])
-        ln = float(c["lng"])
-        if any(haversine_m(la, ln, float(p["lat"]), float(p["lng"])) < min_sep_m for p in picked):
-            continue
-        row = dict(c)
-        row["stage2_rank"] = len(picked) + 1
-        picked.append(row)
-        if len(picked) >= top_k:
-            break
+
+    def _pick_pool(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for c in pool:
+            la = float(c["lat"])
+            ln = float(c["lng"])
+            if any(haversine_m(la, ln, float(p["lat"]), float(p["lng"])) < min_sep_m for p in out):
+                continue
+            row = dict(c)
+            row["stage2_rank"] = len(out) + 1
+            out.append(row)
+            if len(out) >= top_k:
+                break
+        return out
+
+    # 학교·단지내부 등 하드제외 후보는 동일 권역에 대체가 있으면 표에서 제외
+    safe = [
+        c
+        for c in ranked
+        if not ((c.get("scoring") or {}).get("scoring_meta") or {}).get("hard_excluded")
+    ]
+    picked = _pick_pool(safe if safe else ranked)
     return picked
 
 
@@ -268,6 +446,229 @@ def _cache_set(key: str, val: List[Dict[str, Any]]) -> None:
 
 def _round_key(lat: float, lng: float, radius_m: int, query: str) -> str:
     return f"{round(lat, 4)}|{round(lng, 4)}|{radius_m}|{query}"
+
+
+def _strip_html_brief(s: str) -> str:
+    return re.sub(r"<[^>]+>", "", s or "").strip()
+
+
+def _naver_mapxy_to_latlng(mapx: Any, mapy: Any) -> Optional[Tuple[float, float]]:
+    """네이버 로컬 검색 mapx/mapy → WGS84 (정수 문자열 ×1e7 도 단위, 한반도 범위 검증)."""
+    try:
+        xi = int(str(mapx).strip())
+        yi = int(str(mapy).strip())
+    except (TypeError, ValueError):
+        return None
+    lng = xi / 1e7
+    lat = yi / 1e7
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0):
+        return None
+    if lat < 32.5 or lat > 39.5 or lng < 123.5 or lng > 132.5:
+        return None
+    return lat, lng
+
+
+def merge_geo_place_lists(
+    kakao_rows: List[Dict[str, Any]],
+    naver_rows: List[Dict[str, Any]],
+    *,
+    dedupe_m: float = 48.0,
+) -> List[Dict[str, Any]]:
+    """동일 시설 중복 제거: 카카오 우선, 네이버는 근접 중복이 없을 때만 추가."""
+    out: List[Dict[str, Any]] = []
+    for r in kakao_rows or []:
+        try:
+            la = float(r.get("lat"))
+            ln = float(r.get("lng"))
+        except (TypeError, ValueError):
+            continue
+        x = dict(r)
+        x["poi_source"] = x.get("poi_source") or "kakao"
+        out.append(x)
+    for r in naver_rows or []:
+        try:
+            la = float(r.get("lat"))
+            ln = float(r.get("lng"))
+        except (TypeError, ValueError):
+            continue
+        if any(haversine_m(la, ln, float(o.get("lat")), float(o.get("lng"))) < dedupe_m for o in out):
+            continue
+        x = dict(r)
+        x["poi_source"] = "naver"
+        out.append(x)
+    return out
+
+
+def naver_local_search(
+    *,
+    client_id: str,
+    client_secret: str,
+    query: str,
+    lat: float,
+    lng: float,
+    radius_m: int,
+    timeout: float = 4.0,
+) -> List[Dict[str, Any]]:
+    """
+    네이버 지역 검색 API. 검색어 기반이라 원점 주변으로 거리 필터(mapx/mapy 변환 후).
+    일일 한도·정책은 네이버 개발자센터 기준.
+    """
+    if not (client_id or "").strip() or not (client_secret or "").strip():
+        return []
+    ck = f"naver|{_round_key(lat, lng, radius_m, query)}"
+    hit = _cache_get(ck)
+    if hit is not None:
+        return hit
+    headers = {
+        "X-Naver-Client-Id": client_id.strip(),
+        "X-Naver-Client-Secret": client_secret.strip(),
+    }
+    url = "https://openapi.naver.com/v1/search/local.json"
+    acc: List[Dict[str, Any]] = []
+    for start in (1, 6):
+        params = {"query": query, "display": 5, "start": start, "sort": "random"}
+        try:
+            res = requests.get(url, headers=headers, params=params, timeout=timeout)
+        except Exception as e:
+            logging.warning("naver local %s: %s", query, e)
+            break
+        if res.status_code == 401:
+            logging.warning("NAVER local 401 — Client ID/Secret 확인")
+            break
+        if res.status_code >= 400:
+            break
+        try:
+            data = res.json()
+        except Exception:
+            break
+        items = (data or {}).get("items") or []
+        if not items:
+            break
+        for it in items:
+            ll = _naver_mapxy_to_latlng(it.get("mapx"), it.get("mapy"))
+            if not ll:
+                continue
+            plat, plng = ll
+            if haversine_m(lat, lng, plat, plng) > float(radius_m):
+                continue
+            title = _strip_html_brief(str(it.get("title") or ""))
+            if not title:
+                continue
+            acc.append({
+                "id": f"n:{plat:.5f},{plng:.5f}:{title[:24]}",
+                "place_name": title,
+                "category_name": _strip_html_brief(str(it.get("category") or "")),
+                "lat": plat,
+                "lng": plng,
+                "distance_m": int(haversine_m(lat, lng, plat, plng)),
+                "poi_source": "naver",
+            })
+        if len(items) < 5:
+            break
+    _cache_set(ck, acc)
+    return acc
+
+
+def dual_source_places_for_query(
+    *,
+    kakao_key: str,
+    naver_client_id: str,
+    naver_client_secret: str,
+    lat: float,
+    lng: float,
+    radius_m: int,
+    query: str,
+) -> List[Dict[str, Any]]:
+    k_rows: List[Dict[str, Any]] = []
+    if (kakao_key or "").strip():
+        k_rows = kakao_keyword_search(
+            kakao_key=kakao_key,
+            lat=lat,
+            lng=lng,
+            radius_m=radius_m,
+            query=query,
+        )
+    n_rows = naver_local_search(
+        client_id=naver_client_id,
+        client_secret=naver_client_secret,
+        query=query,
+        lat=lat,
+        lng=lng,
+        radius_m=radius_m,
+    )
+    return merge_geo_place_lists(k_rows, n_rows)
+
+
+# 은행·대형마트 (키워드 수 최소화 — 호출량·한도)
+RETAIL_BANK_QUERIES = ["KB국민은행", "신한은행", "우리은행", "하나은행"]
+RETAIL_MART_QUERIES = ["이마트", "홈플러스", "롯데마트", "코스트코"]
+
+
+def collect_retail_finance_pois(
+    *,
+    kakao_key: str,
+    naver_client_id: str = "",
+    naver_client_secret: str = "",
+    lat: float,
+    lng: float,
+    radius_m: int = 2000,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:
+    """1금융·대형마트 후보 POI (카카오+네이버 병합, 좌표 기준 중복 제거)."""
+    meta: Dict[str, Any] = {"errors": [], "naver_used": bool((naver_client_id or "").strip() and (naver_client_secret or "").strip())}
+    bank_map: Dict[str, Dict[str, Any]] = {}
+    mart_map: Dict[str, Dict[str, Any]] = {}
+
+    def _ingest(target: Dict[str, Dict[str, Any]], rows: List[Dict[str, Any]], kind: str) -> None:
+        for r in rows or []:
+            try:
+                la = float(r.get("lat"))
+                ln = float(r.get("lng"))
+            except (TypeError, ValueError):
+                continue
+            key = f"{round(la, 5)},{round(ln, 5)}"
+            if key in target:
+                continue
+            x = dict(r)
+            x["retail_kind"] = kind
+            target[key] = x
+
+    def _run_queries(queries: List[str], kind: str, dest: Dict[str, Dict[str, Any]]) -> None:
+        for q in queries:
+            try:
+                rows = dual_source_places_for_query(
+                    kakao_key=kakao_key,
+                    naver_client_id=naver_client_id,
+                    naver_client_secret=naver_client_secret,
+                    lat=lat,
+                    lng=lng,
+                    radius_m=radius_m,
+                    query=q,
+                )
+                _ingest(dest, rows, kind)
+            except Exception as e:
+                meta["errors"].append(f"{kind}:{q}:{e}")
+
+    _run_queries(RETAIL_BANK_QUERIES, "bank", bank_map)
+    _run_queries(RETAIL_MART_QUERIES, "mart", mart_map)
+    return list(bank_map.values()), list(mart_map.values()), meta
+
+
+def _count_retail_within(
+    lat: float,
+    lng: float,
+    radius_m: float,
+    places: List[Dict[str, Any]],
+) -> int:
+    n = 0
+    for p in places or []:
+        try:
+            la = float(p.get("lat"))
+            ln = float(p.get("lng"))
+        except (TypeError, ValueError):
+            continue
+        if haversine_m(lat, lng, la, ln) <= radius_m:
+            n += 1
+    return n
 
 
 def kakao_keyword_search(
@@ -360,18 +761,48 @@ def score_proptech_clinic_site(
     offset_m: float,
     anchor_poi_count_100m: int,
     medical_facility_count_100m: int,
+    anchor_poi_count_300m: int = 0,
     master_activity_index: Optional[float],
     young_ratio: Optional[float],
     master_total_pop: Optional[float],
     bus_stop_count: Optional[float],
     has_building_parking: Optional[bool] = None,
     nearby_public_parking_100m: Optional[bool] = None,
+    land_use_hard_exclude: bool = False,
+    land_use_mult: float = 1.0,
+    land_use_reasons: Optional[List[str]] = None,
+    bank_poi_count_150m: int = 0,
+    mart_poi_count_300m: int = 0,
 ) -> Dict[str, Any]:
     """
     의원·상가 입지 100점 만점 (6축) + S/A/B/C.
-    데이터 공백 구간은 메타 notes에 명시한다.
+    상업 가시성 우선: 토지용도 하드제외·이면 프록시는 land_use_* 로 주입.
     """
     notes: List[str] = []
+    lur = list(land_use_reasons or [])
+    if lur:
+        notes.extend([f"토지·동선: {x}" for x in lur[:5]])
+
+    if land_use_hard_exclude:
+        notes.append("하드제외: 학교·단지·공원 부지 인접 등(카카오 프록시) → 0점 처리.")
+        return {
+            "score": 0.0,
+            "grade": "C",
+            "grade_label_ko": "제외",
+            "components": {
+                "foot_traffic": 0.0,
+                "visibility_access": 0.0,
+                "residential_proximity": 0.0,
+                "anchor_franchises": 0.0,
+                "medical_synergy": 0.0,
+                "parking_infrastructure": 0.0,
+            },
+            "scoring_meta": {
+                "method": "proptech_clinic_v3_dual_poi",
+                "notes": notes,
+                "hard_excluded": True,
+            },
+        }
 
     # 1) 유동인구 지수 (max 30) — 마스터 활력·인구로 분위 프록시 (실제 50m 격자 유동인구 아님)
     ai = float(master_activity_index) if master_activity_index is not None else None
@@ -395,11 +826,12 @@ def score_proptech_clinic_site(
         foot = 15.0
         notes.append("유동인구: 행정동 마스터 부재 → 평균 수준(15점) 가정.")
     else:
-        foot_map = {0: 5.0, 1: 15.0, 2: 25.0, 3: 30.0}
+        # 은행·마트 가점 반영을 위해 상한 소폭 조정(축 합계 100 유지)
+        foot_map = {0: 5.0, 1: 13.0, 2: 22.0, 3: 27.0}
         foot = foot_map.get(tier_ft, 15.0)
         notes.append("유동인구: 실제 격자 유동인구가 아니라 마스터 활력·총인구 기반 분위 프록시입니다.")
     if young_ratio is not None and float(young_ratio) >= 0.36:
-        foot = min(30.0, foot + 2.0)
+        foot = min(28.0, foot + 2.0)
 
     # 2) 가시성·접근 (max 20) — 코너=격자 오프셋 방향 프록시, 횡단보도=버스정류장 밀도 프록시
     corner = 0.0
@@ -421,8 +853,9 @@ def score_proptech_clinic_site(
         notes.append("횡단보도: 버스정류장 수 없음 → 0점(데이터 공백).")
     visibility = min(20.0, corner + cross)
 
-    # 3) 배후 주거 (max 20) — 행정동 중심까지 거리 감쇠 (아파트 정문 데이터 없음)
+    # 3) 배후 주거 (max 20) — 행정동 중심 프록시이나, 무앵커 전면이면 과대가점 방지(상업입지 우선)
     residential = 0.0
+    na100 = int(anchor_poi_count_100m)
     if (
         region_center_lat is not None
         and region_center_lng is not None
@@ -432,19 +865,31 @@ def score_proptech_clinic_site(
         d_admin = haversine_m(lat, lng, float(region_center_lat), float(region_center_lng))
         if d_admin < 300:
             residential = 20.0 * max(0.0, 1.0 - d_admin / 300.0)
-        notes.append("배후 주거: 아파트 정문 좌표 없음 → 인접 행정동 중심까지 거리 감쇠 프록시.")
+        notes.append("배후 주거: 행정동 중심 거리 프록시(실제 단지정문·지적 마스킹은 추후 GIS).")
     else:
         residential = 8.0
         notes.append("배후 주거: 행정동 중심좌표 없음 → 중립 프록시(8점).")
+    # 100m 내 상업앵커가 없으면 '배후주거'만으로는 클리닉 전면 입지로 보지 않음
+    res_anchor_scale = 0.22 + 0.78 * min(1.0, na100 / 2.0)
+    residential = residential * res_anchor_scale
 
-    # 4) 앵커 (max 15) — 반경 100m
+    # 4) 앵커·은행·대형마트 (합 max 25) — A급 프랜차이즈 100m + 150m 은행 + 300m 마트 (카카오·네이버 병합 집계)
     na = int(anchor_poi_count_100m)
     if na >= 3:
-        anchor_pts = 15.0
+        fr = 15.0
     elif na >= 1:
-        anchor_pts = 10.0
+        fr = 10.0
     else:
-        anchor_pts = 0.0
+        fr = 0.0
+    nb = int(bank_poi_count_150m)
+    nm = int(mart_poi_count_300m)
+    bank_pts = 7.0 if nb >= 2 else (5.0 if nb >= 1 else 0.0)
+    mart_pts = 7.0 if nm >= 2 else (5.0 if nm >= 1 else 0.0)
+    anchor_pts = min(25.0, fr + bank_pts + mart_pts)
+    if bank_pts or mart_pts:
+        notes.append(
+            f"집객 인프라: 150m 내 은행류 {nb}곳(+{bank_pts:.0f}), 300m 내 대형마트·복합류 {nm}곳(+{mart_pts:.0f}) — 카카오·네이버 중복 제거 병합."
+        )
 
     # 5) 메디컬 시너지 (max 10) — 동일 과목 HIRA 목록 100m (타 진료과·약국은 미포함)
     nm = int(medical_facility_count_100m)
@@ -474,6 +919,14 @@ def score_proptech_clinic_site(
 
     total = foot + visibility + residential + anchor_pts + med + park
     total = max(0.0, min(100.0, total))
+    lm = float(land_use_mult)
+    if lm < 0.1:
+        lm = 0.1
+    if lm > 1.0:
+        lm = 1.0
+    if lm < 0.999:
+        total = max(0.0, min(100.0, total * lm))
+        notes.append(f"토지·동선 종합 감점 배율 ×{lm:.2f} (도로폭 미연동·카카오 프록시).")
 
     if total >= 90:
         grade, label = "S", "최우수"
@@ -497,8 +950,11 @@ def score_proptech_clinic_site(
             "parking_infrastructure": round(park, 1),
         },
         "scoring_meta": {
-            "method": "proptech_clinic_v1",
+            "method": "proptech_clinic_v3_dual_poi",
             "notes": notes,
+            "anchor_poi_count_300m": int(anchor_poi_count_300m),
+            "bank_poi_count_150m": int(bank_poi_count_150m),
+            "mart_poi_count_300m": int(mart_poi_count_300m),
         },
     }
 
@@ -510,28 +966,37 @@ def collect_anchor_pois(
     lng: float,
     radius_m: int,
     brands: Optional[List[Tuple[str, str]]] = None,
+    naver_client_id: str = "",
+    naver_client_secret: str = "",
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     pairs = brands or DEFAULT_ANCHOR_BRANDS
     merged: Dict[str, Dict[str, Any]] = {}
     meta_errors: List[str] = []
-    if not (kakao_key or "").strip():
-        return [], {"kakao": "KAKAO_REST_KEY 미설정 — 앵커 POI를 조회하지 않습니다."}
+    naver_on = bool((naver_client_id or "").strip() and (naver_client_secret or "").strip())
+    if not (kakao_key or "").strip() and not naver_on:
+        return [], {"kakao": "KAKAO·NAVER 미설정 — 앵커 POI를 조회하지 않습니다."}
+
+    def _fetch_brand(label: str, q: str) -> Tuple[str, str, List[Dict[str, Any]]]:
+        rows = dual_source_places_for_query(
+            kakao_key=kakao_key or "",
+            naver_client_id=naver_client_id,
+            naver_client_secret=naver_client_secret,
+            lat=lat,
+            lng=lng,
+            radius_m=radius_m,
+            query=q,
+        )
+        return label, q, rows
+
     futs: Dict[Any, Tuple[str, str]] = {}
     with ThreadPoolExecutor(max_workers=min(6, len(pairs))) as ex:
         for label, q in pairs:
-            fut = ex.submit(
-                kakao_keyword_search,
-                kakao_key=kakao_key,
-                lat=lat,
-                lng=lng,
-                radius_m=radius_m,
-                query=q,
-            )
+            fut = ex.submit(_fetch_brand, label, q)
             futs[fut] = (label, q)
         for fut in as_completed(futs):
             label, q = futs[fut]
             try:
-                rows = fut.result()
+                _, _, rows = fut.result()
             except Exception as e:
                 meta_errors.append(f"{q}:{e}")
                 continue
@@ -542,7 +1007,11 @@ def collect_anchor_pois(
                     continue
                 row["brand_label"] = label
                 merged[key] = row
-    return list(merged.values()), {"errors": meta_errors}
+    return list(merged.values()), {
+        "errors": meta_errors,
+        "naver_merged": naver_on,
+        "kakao_used": bool((kakao_key or "").strip()),
+    }
 
 
 def build_micro_site_payload(
@@ -554,11 +1023,31 @@ def build_micro_site_payload(
     competitors: List[Dict[str, Any]],
     kakao_key: str,
     master_ctx: Optional[Dict[str, Any]],
+    naver_client_id: str = "",
+    naver_client_secret: str = "",
 ) -> Dict[str, Any]:
-    anchor_list, kmeta = collect_anchor_pois(kakao_key=kakao_key, lat=lat, lng=lng, radius_m=radius_m)
+    anchor_list, kmeta = collect_anchor_pois(
+        kakao_key=kakao_key,
+        lat=lat,
+        lng=lng,
+        radius_m=radius_m,
+        naver_client_id=naver_client_id,
+        naver_client_secret=naver_client_secret,
+    )
     n_comp = len(competitors or [])
     n_a_100 = _count_anchors_within(lat, lng, 100.0, anchor_list)
+    n_a_300 = _count_anchors_within(lat, lng, 300.0, anchor_list)
     n_c_100 = _count_hospitals_within(lat, lng, 100.0, competitors or [])
+    bank_pl, mart_pl, rf_meta = collect_retail_finance_pois(
+        kakao_key=kakao_key,
+        naver_client_id=naver_client_id,
+        naver_client_secret=naver_client_secret,
+        lat=lat,
+        lng=lng,
+        radius_m=min(2000, max(radius_m * 3, 900)),
+    )
+    n_bank_150 = _count_retail_within(lat, lng, 150.0, bank_pl)
+    n_mart_300 = _count_retail_within(lat, lng, 300.0, mart_pl)
     act = None
     young = None
     row: Dict[str, Any] = {}
@@ -593,10 +1082,13 @@ def build_micro_site_payload(
         offset_m=0.0,
         anchor_poi_count_100m=n_a_100,
         medical_facility_count_100m=n_c_100,
+        anchor_poi_count_300m=n_a_300,
         master_activity_index=act,
         young_ratio=young,
         master_total_pop=mpop,
         bus_stop_count=bsc,
+        bank_poi_count_150m=n_bank_150,
+        mart_poi_count_300m=n_mart_300,
     )
     comp_out: List[Dict[str, Any]] = []
     for h in (competitors or [])[:40]:
@@ -612,7 +1104,9 @@ def build_micro_site_payload(
         f"앵커 프랜차이즈(근접) {len(anchor_list)}곳, 동일 과목 경쟁 {n_comp}곳."
     )
     if not (kakao_key or "").strip():
-        narrative += " 카카오 REST 키가 없어 프랜차이즈 POI는 제외되었습니다."
+        narrative += " 카카오 REST 키가 없어 일부 POI가 제외될 수 있습니다."
+    if not ((naver_client_id or "").strip() and (naver_client_secret or "").strip()):
+        narrative += " 네이버 Client ID/Secret 미설정 시 카카오 결과만 병합합니다."
     return {
         "status": "success",
         "lat": lat,
@@ -634,6 +1128,9 @@ def build_micro_site_payload(
         "competitor_count": n_comp,
         "anchor_poi_count_100m": n_a_100,
         "medical_facility_count_100m": n_c_100,
+        "bank_poi_count_150m": n_bank_150,
+        "mart_poi_count_300m": n_mart_300,
+        "retail_finance_meta": rf_meta,
         "scoring": scoring,
         "narrative": narrative,
         "data_layers": {

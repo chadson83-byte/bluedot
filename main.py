@@ -76,6 +76,10 @@ def api_health():
             "hira_key_from_env": bool(os.getenv("HIRA_API_KEY", "").strip()),
             "data_go_building_key_from_env": bool(dg),
             "kakao_rest_key_from_env": bool(os.getenv("KAKAO_REST_KEY", "").strip()),
+            "naver_local_key_from_env": bool(
+                (os.getenv("NAVER_CLIENT_ID") or "").strip()
+                and (os.getenv("NAVER_CLIENT_SECRET") or "").strip()
+            ),
             "juso_key_from_env": bool(
                 (os.getenv("JUSO_CONFM_KEY") or os.getenv("JUSO_ADDR_LINK_KEY") or "").strip()
             ),
@@ -1541,11 +1545,15 @@ def _stage2_region_cands(
     r_fetch_km = min(r_fetch_km, 3.0)
     hospitals, _ = fetch_real_hospitals(lat, lng, r_fetch_km, dept)
     anchor_r = min(2000, max(eval_r * 2 + 320, 720))
+    naver_id = (os.getenv("NAVER_CLIENT_ID") or "").strip()
+    naver_sec = (os.getenv("NAVER_CLIENT_SECRET") or "").strip()
     anchors, _ = collect_anchor_pois(
         kakao_key=kakao_key,
         lat=lat,
         lng=lng,
         radius_m=anchor_r,
+        naver_client_id=naver_id,
+        naver_client_secret=naver_sec,
     )
     return build_region_candidate_scores(
         center_lat=lat,
@@ -1558,6 +1566,9 @@ def _stage2_region_cands(
         dept=dept,
         df_master=df_master,
         resolve_master_ctx=resolve_nearest_master_context,
+        kakao_key=kakao_key,
+        naver_client_id=naver_id,
+        naver_client_secret=naver_sec,
     )
 
 
@@ -1923,6 +1934,8 @@ def api_micro_site(lat: float, lng: float, radius_m: int = 400, dept: str = "한
         competitors=comps or [],
         kakao_key=KAKAO_REST_KEY or "",
         master_ctx=master_ctx,
+        naver_client_id=(os.getenv("NAVER_CLIENT_ID") or "").strip(),
+        naver_client_secret=(os.getenv("NAVER_CLIENT_SECRET") or "").strip(),
     )
 
 
