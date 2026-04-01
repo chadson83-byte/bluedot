@@ -5,7 +5,81 @@
 // [0] fetch with timeout + JSON 안전 파싱 (CB-3 대응)
 const FETCH_TIMEOUT_MS = 90000; // 일반 API
 /** 심평원·마스터 병합 등 무거운 분석 — Vercel 프록시/클라이언트 모두 여유 있게 */
-const BLUEDOT_ANALYZE_TIMEOUT_MS = 180000; // 3분
+const BLUEDOT_ANALYZE_TIMEOUT_MS = 180000; // 3분 (레거시 GET 단일 요청)
+/** 비동기 작업 폴링: 짧은 HTTP 반복 → 프록시/게이트웨이 타임아웃 완화 */
+const BLUEDOT_JOB_POLL_MS = 1600;
+const BLUEDOT_JOB_POLL_MAX = 140;
+const BLUEDOT_JOB_START_TIMEOUT_MS = 30000;
+
+function setLoadingOverlayHint(title, sub) {
+    const t = document.getElementById('loading-overlay-title');
+    const s = document.getElementById('loading-overlay-sub');
+    if (t && title != null) t.textContent = title;
+    if (s && sub != null) s.textContent = sub;
+}
+
+/**
+ * POST /api/hospitals/async 접수 후 job 폴링. 실패 시 { fallback: true } 로 레거시 GET 시도 가능.
+ */
+async function runHospitalsAnalysisViaJob(lat, lng, deptName, radius, walkMinutes) {
+    const origin = bluedotBackendOrigin();
+    const postUrl = `${origin}/api/hospitals/async`;
+    let startPayload;
+    try {
+        const res = await fetchWithTimeout(postUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                lat,
+                lng,
+                dept: deptName || '한의원',
+                radius: parseInt(String(radius), 10) || 1,
+                walk_minutes: walkMinutes,
+            }),
+            timeout: BLUEDOT_JOB_START_TIMEOUT_MS,
+        });
+        startPayload = await parseJsonSafe(res);
+        if (!res.ok) {
+            return { ok: false, fallback: true, error: new Error(bluedotApiErrorMessage(res, startPayload)) };
+        }
+    } catch (e) {
+        return { ok: false, fallback: true, error: e };
+    }
+    const jobId = startPayload && startPayload.job_id;
+    if (!jobId) {
+        return { ok: false, fallback: true, error: new Error('job_id 없음') };
+    }
+
+    for (let i = 0; i < BLUEDOT_JOB_POLL_MAX; i++) {
+        setLoadingOverlayHint(
+            'BLUEDOT 거시 상권 분석 중…',
+            '백그라운드에서 심평원·마스터 데이터를 병합합니다. 창을 닫지 마세요.',
+        );
+        let pollRes;
+        let state;
+        try {
+            pollRes = await fetchWithTimeout(`${origin}/api/hospitals/jobs/${encodeURIComponent(jobId)}`, {
+                timeout: BLUEDOT_JOB_START_TIMEOUT_MS,
+            });
+            state = await parseJsonSafe(pollRes);
+        } catch (e) {
+            return { ok: false, fallback: false, error: e };
+        }
+        if (!pollRes.ok) {
+            const detail = state && state.detail != null ? String(state.detail) : '';
+            return { ok: false, fallback: false, error: new Error(detail || ('HTTP ' + pollRes.status)) };
+        }
+        if (state.status === 'completed' && state.result) {
+            return { ok: true, data: state.result };
+        }
+        if (state.status === 'failed') {
+            const r = state.result || { status: 'error', message: state.message || '분석 실패' };
+            return { ok: true, data: r };
+        }
+        await new Promise((r) => setTimeout(r, BLUEDOT_JOB_POLL_MS));
+    }
+    return { ok: false, fallback: false, error: new Error('분석 대기 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.') };
+}
 async function fetchWithTimeout(url, opts = {}) {
     const timeoutMs = opts.timeout ?? FETCH_TIMEOUT_MS;
     const outer = opts.signal;
@@ -1546,20 +1620,40 @@ async function startAnalysis() {
     const submitBtn = document.getElementById('analyze-submit-btn');
     submitBtn.innerText = "데이터 수집 및 분석 중..."; submitBtn.style.pointerEvents = "none";
     document.getElementById('loading-overlay').style.display = 'flex';
+    setLoadingOverlayHint(
+        'BLUEDOT 거시 상권 분석',
+        '서버에 작업을 접수합니다. 장시간 분석은 백그라운드에서 진행됩니다.',
+    );
 
-    const deptQ = encodeURIComponent(selectedDeptName || '한의원');
+    const deptName = selectedDeptName || '한의원';
     const walkMinutes = 10;
-    const url = `${bluedotBackendOrigin()}/api/hospitals?lat=${center.getLat()}&lng=${center.getLng()}&dept=${deptQ}&radius=${radius}&walk_minutes=${walkMinutes}`;
     try {
-        const response = await fetchWithTimeout(url, { timeout: BLUEDOT_ANALYZE_TIMEOUT_MS });
-        const data = await parseJsonSafe(response);
-        if (!response.ok) {
-            alert(bluedotApiErrorMessage(response, data));
+        let data = null;
+        const jobRes = await runHospitalsAnalysisViaJob(center.getLat(), center.getLng(), deptName, radius, walkMinutes);
+        if (jobRes.ok) {
+            data = jobRes.data;
+        } else if (jobRes.fallback) {
+            setLoadingOverlayHint('재시도 중…', '긴 연결로 직접 분석합니다(최대 3분).');
+            const deptQ = encodeURIComponent(deptName);
+            const url = `${bluedotBackendOrigin()}/api/hospitals?lat=${center.getLat()}&lng=${center.getLng()}&dept=${deptQ}&radius=${radius}&walk_minutes=${walkMinutes}`;
+            const response = await fetchWithTimeout(url, { timeout: BLUEDOT_ANALYZE_TIMEOUT_MS });
+            data = await parseJsonSafe(response);
+            if (!response.ok) {
+                alert(bluedotApiErrorMessage(response, data));
+                document.getElementById('analysis-panel').classList.remove('hidden-mode');
+                return;
+            }
+        } else {
+            alert(bluedotNetworkErrorMessage(jobRes.error));
+            document.getElementById('analysis-panel').classList.remove('hidden-mode');
+            return;
+        }
+        if (!data) {
             document.getElementById('analysis-panel').classList.remove('hidden-mode');
             return;
         }
         if (data.status === 'error') {
-            alert(data.message);
+            alert(data.message || '분석에 실패했습니다.');
             document.getElementById('analysis-panel').classList.remove('hidden-mode');
             return;
         }
@@ -1569,6 +1663,10 @@ async function startAnalysis() {
     } finally {
         submitBtn.innerText = "거시 상권 정밀 분석 (결제)"; submitBtn.style.pointerEvents = "auto";
         document.getElementById('loading-overlay').style.display = 'none';
+        setLoadingOverlayHint(
+            'BLUEDOT AI가 수만 건의 데이터를 분석 중입니다...',
+            '(심평원 · 통계청 · 공공데이터 교차 검증 중)',
+        );
     }
 }
 

@@ -15,6 +15,8 @@ import os
 import jwt
 from datetime import datetime
 import time
+import copy
+import uuid
 from pydantic import BaseModel
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1391,11 +1393,152 @@ def list_payments(user_id: Optional[int] = Depends(_get_current_user_id)):
     return {"payments": db.get_payments(user_id)}
 
 
+# --- 거시 분석 캐시 / 비동기 작업(Fly·장시간 요청 안정화; 멀티 머신 시 캐시·잡은 인스턴스 로컬) ---
+_HOSPITALS_ANALYSIS_CACHE_LOCK = threading.Lock()
+_HOSPITALS_ANALYSIS_CACHE: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
+_HOSPITALS_ANALYSIS_TTL = float(os.getenv("BLUEDOT_HOSPITALS_CACHE_TTL_SEC", "300"))
+_HOSPITALS_ANALYSIS_MAX_KEYS = int(os.getenv("BLUEDOT_HOSPITALS_CACHE_MAX_KEYS", "120"))
+
+_NEARBY_HOSP_CACHE_LOCK = threading.Lock()
+_NEARBY_HOSP_CACHE: Dict[Tuple[Any, ...], Tuple[float, List[Dict[str, Any]]]] = {}
+_NEARBY_HOSP_TTL = float(os.getenv("BLUEDOT_NEARBY_CACHE_TTL_SEC", "90"))
+_NEARBY_HOSP_MAX_KEYS = int(os.getenv("BLUEDOT_NEARBY_CACHE_MAX_KEYS", "200"))
+
+_ANALYSIS_JOBS_LOCK = threading.Lock()
+_ANALYSIS_JOBS: Dict[str, Dict[str, Any]] = {}
+
+
+def _hospitals_analysis_cache_key(lat: float, lng: float, dept: str, radius: int, walk_minutes: int) -> Tuple[Any, ...]:
+    return (
+        round(float(lat), 3),
+        round(float(lng), 3),
+        str(dept or "").strip(),
+        int(radius),
+        int(walk_minutes),
+    )
+
+
+def _hospitals_cache_get(key: Tuple[Any, ...]) -> Optional[Dict[str, Any]]:
+    now = time.time()
+    with _HOSPITALS_ANALYSIS_CACHE_LOCK:
+        ent = _HOSPITALS_ANALYSIS_CACHE.get(key)
+        if not ent:
+            return None
+        ts, val = ent
+        if now - ts > _HOSPITALS_ANALYSIS_TTL:
+            try:
+                del _HOSPITALS_ANALYSIS_CACHE[key]
+            except KeyError:
+                pass
+            return None
+        return copy.deepcopy(val)
+
+
+def _hospitals_cache_set(key: Tuple[Any, ...], payload: Dict[str, Any]) -> None:
+    if payload.get("status") != "success":
+        return
+    with _HOSPITALS_ANALYSIS_CACHE_LOCK:
+        _HOSPITALS_ANALYSIS_CACHE[key] = (time.time(), copy.deepcopy(payload))
+        while len(_HOSPITALS_ANALYSIS_CACHE) > _HOSPITALS_ANALYSIS_MAX_KEYS:
+            try:
+                del _HOSPITALS_ANALYSIS_CACHE[next(iter(_HOSPITALS_ANALYSIS_CACHE))]
+            except (StopIteration, KeyError):
+                break
+
+
+def _nearby_cache_key(lat: float, lng: float, dept: str, radius: int) -> Tuple[Any, ...]:
+    return (round(float(lat), 3), round(float(lng), 3), str(dept or "").strip(), int(radius))
+
+
+def _nearby_cache_get(key: Tuple[Any, ...]) -> Optional[List[Dict[str, Any]]]:
+    now = time.time()
+    with _NEARBY_HOSP_CACHE_LOCK:
+        ent = _NEARBY_HOSP_CACHE.get(key)
+        if not ent:
+            return None
+        ts, lst = ent
+        if now - ts > _NEARBY_HOSP_TTL:
+            try:
+                del _NEARBY_HOSP_CACHE[key]
+            except KeyError:
+                pass
+            return None
+        return copy.deepcopy(lst)
+
+
+def _nearby_cache_set(key: Tuple[Any, ...], hospitals: List[Dict[str, Any]]) -> None:
+    with _NEARBY_HOSP_CACHE_LOCK:
+        _NEARBY_HOSP_CACHE[key] = (time.time(), copy.deepcopy(hospitals))
+        while len(_NEARBY_HOSP_CACHE) > _NEARBY_HOSP_MAX_KEYS:
+            try:
+                del _NEARBY_HOSP_CACHE[next(iter(_NEARBY_HOSP_CACHE))]
+            except (StopIteration, KeyError):
+                break
+
+
+def _prune_analysis_jobs() -> None:
+    now = time.time()
+    with _ANALYSIS_JOBS_LOCK:
+        stale = [k for k, v in _ANALYSIS_JOBS.items() if now - float(v.get("created", 0)) > 7200.0]
+        for k in stale:
+            _ANALYSIS_JOBS.pop(k, None)
+        while len(_ANALYSIS_JOBS) > 400:
+            oldest = min(_ANALYSIS_JOBS.keys(), key=lambda x: float(_ANALYSIS_JOBS[x].get("created", now)))
+            _ANALYSIS_JOBS.pop(oldest, None)
+
+
+def _run_hospitals_job(job_id: str, lat: float, lng: float, dept: str, radius: int, walk_minutes: int) -> None:
+    try:
+        with _ANALYSIS_JOBS_LOCK:
+            if job_id in _ANALYSIS_JOBS:
+                _ANALYSIS_JOBS[job_id]["status"] = "running"
+        result = get_analysis_data(
+            lat=lat,
+            lng=lng,
+            dept=dept,
+            radius=radius,
+            walk_minutes=walk_minutes,
+            nocache=False,
+        )
+        with _ANALYSIS_JOBS_LOCK:
+            if job_id not in _ANALYSIS_JOBS:
+                return
+            if result.get("status") == "success":
+                _ANALYSIS_JOBS[job_id]["status"] = "completed"
+            else:
+                _ANALYSIS_JOBS[job_id]["status"] = "failed"
+                _ANALYSIS_JOBS[job_id]["message"] = str(result.get("message") or "분석 실패")
+            _ANALYSIS_JOBS[job_id]["result"] = result
+    except Exception as ex:
+        logging.exception("hospitals async job %s", job_id)
+        with _ANALYSIS_JOBS_LOCK:
+            if job_id in _ANALYSIS_JOBS:
+                _ANALYSIS_JOBS[job_id]["status"] = "failed"
+                _ANALYSIS_JOBS[job_id]["message"] = str(ex)
+                _ANALYSIS_JOBS[job_id]["result"] = {"status": "error", "message": str(ex)}
+
+
+class HospitalsAsyncRequest(BaseModel):
+    lat: float
+    lng: float
+    dept: str = "한의원"
+    radius: int = 1
+    walk_minutes: int = 10
+
+
 @app.get("/api/hospitals-nearby")
-def get_hospitals_nearby(lat: float, lng: float, dept: str, radius: int = 1):
+def get_hospitals_nearby(lat: float, lng: float, dept: str, radius: int = 1, nocache: bool = False):
     """지도 호버 시 해당 좌표 반경 내 경쟁 의료기관만 반환 (결과 화면에서 사용)."""
+    ck = _nearby_cache_key(lat, lng, dept, radius)
+    if not nocache:
+        hit = _nearby_cache_get(ck)
+        if hit is not None:
+            return {"hospitals": hit, "cached": True}
     real_hosps, _ = fetch_real_hospitals(lat, lng, radius, dept)
-    return {"hospitals": real_hosps}
+    lst = real_hosps or []
+    if not nocache:
+        _nearby_cache_set(ck, lst)
+    return {"hospitals": lst}
 
 
 @app.get("/api/micro-site")
@@ -1477,8 +1620,23 @@ def api_building_aging(lat: float, lng: float, dept: str = "한의원", radius_k
 
 
 @app.get("/api/hospitals")
-def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_minutes: int = 10):
+def get_analysis_data(
+    lat: float,
+    lng: float,
+    dept: str,
+    radius: int = 1,
+    walk_minutes: int = 10,
+    nocache: bool = False,
+):
     # 임시: 로그인/크레딧 없이 분석 허용 (프로덕션 재적용 시 Depends(_require_auth_and_use_credit) 복구)
+    if not nocache:
+        ck0 = _hospitals_analysis_cache_key(lat, lng, dept, radius, walk_minutes)
+        cached = _hospitals_cache_get(ck0)
+        if cached is not None:
+            cached = dict(cached)
+            cached["cached"] = True
+            return cached
+
     analyzed_nodes = []
     all_hospitals = []
     
@@ -1703,18 +1861,71 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
 
             # CSV 데이터가 정상 처리되었으면 즉시 반환!
             ranked_nodes = sorted(analyzed_nodes, key=lambda x: x["score_val"], reverse=True)
-            for index, n in enumerate(ranked_nodes): n["rank"] = index + 1
-            return {
-                "status": "success", "department": dept, "search_radius": radius,
-                "hospitals": all_hospitals, "recommendations": ranked_nodes,
+            for index, n in enumerate(ranked_nodes):
+                n["rank"] = index + 1
+            payload = {
+                "status": "success",
+                "department": dept,
+                "search_radius": radius,
+                "hospitals": all_hospitals,
+                "recommendations": ranked_nodes,
                 "phase2": phase2_meta,
             }
+            if not nocache:
+                _hospitals_cache_set(_hospitals_analysis_cache_key(lat, lng, dept, radius, walk_minutes), payload)
+            return payload
         except Exception as e:
             print(f"🚨 하단 버튼 연산 중 에러 발생: {e}")
             return {"status": "error", "message": f"서버 연산 에러: {e}"}
 
     # 🚨 [핀셋 수정 3] 남측/북측 가짜 데이터를 만들던 offset 백업 로직 완전 영구 삭제
     return {"status": "error", "message": "서버에 상권 마스터 데이터(CSV)가 존재하지 않습니다."}
+
+
+@app.post("/api/hospitals/async")
+def hospitals_analysis_start_async(body: HospitalsAsyncRequest):
+    """
+    장시간 분석을 백그라운드 스레드에서 수행. 클라이언트는 짧은 HTTP로 접수 후 /api/hospitals/jobs/{id} 폴링.
+    (프록시·브라우저 타임아웃 회피; 단일 프로세스 메모리 잡 — Fly 스케일 아웃 시 Redis 큐 권장)
+    """
+    _prune_analysis_jobs()
+    job_id = uuid.uuid4().hex
+    with _ANALYSIS_JOBS_LOCK:
+        _ANALYSIS_JOBS[job_id] = {
+            "status": "queued",
+            "kind": "hospitals",
+            "created": time.time(),
+        }
+    t = threading.Thread(
+        target=_run_hospitals_job,
+        args=(job_id, body.lat, body.lng, body.dept, body.radius, body.walk_minutes),
+        daemon=True,
+        name=f"hospitals-job-{job_id[:8]}",
+    )
+    t.start()
+    return {
+        "status": "accepted",
+        "job_id": job_id,
+        "poll_url": f"/api/hospitals/jobs/{job_id}",
+    }
+
+
+@app.get("/api/hospitals/jobs/{job_id}")
+def hospitals_analysis_job_status(job_id: str):
+    with _ANALYSIS_JOBS_LOCK:
+        j = _ANALYSIS_JOBS.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다. 만료되었거나 잘못된 ID입니다.")
+    st = str(j.get("status") or "")
+    if st == "completed":
+        return {"status": "completed", "result": j.get("result")}
+    if st == "failed":
+        return {
+            "status": "failed",
+            "message": j.get("message"),
+            "result": j.get("result"),
+        }
+    return {"status": st, "kind": j.get("kind")}
 
 # =========================================================
 # [3] 🚀 NEW V3: 전 과목 멀티 알고리즘 AI 검색 엔진 (유연한 반경 지원)
