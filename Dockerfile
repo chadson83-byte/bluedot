@@ -11,8 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+# Windows에서 UTF-16으로 저장된 requirements.txt도 pip이 읽을 수 있게 UTF-8로 정규화
+COPY docker/normalize_requirements.py /tmp/normalize_requirements.py
+COPY requirements.txt /tmp/requirements.txt
+RUN python3 /tmp/normalize_requirements.py \
+ && pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
 
