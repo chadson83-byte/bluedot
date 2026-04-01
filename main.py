@@ -116,8 +116,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 운영 시에는 환경변수 사용 권장: HIRA_API_KEY
-HIRA_API_KEY = os.getenv("HIRA_API_KEY", "8ee102c5d025b9a9709736175aa0168bac653098ef0f762e797f727d77dc7da9")
+# 운영 시에는 환경변수 사용 권장: HIRA_API_KEY (공공데이터포털 인증키, URL 인코딩된 값 그대로 넣어도 됨)
+def _hira_service_key_raw() -> str:
+    k = (os.getenv("HIRA_API_KEY") or "").strip().strip('"').strip("'")
+    if k:
+        return urllib.parse.unquote(k)
+    # 로컬 개발 폴백(배포는 반드시 env)
+    return urllib.parse.unquote(
+        "8ee102c5d025b9a9709736175aa0168bac653098ef0f762e797f727d77dc7da9"
+    )
+
+
+HIRA_API_KEY = _hira_service_key_raw()
 
 
 def _include_car_insurance_insight_for_dept(dept: str) -> bool:
@@ -204,6 +214,23 @@ def _hira_cache_ttl_seconds() -> float:
     except ValueError:
         t = 120.0
     return max(20.0, min(t, 3600.0))
+
+
+def _hira_http_timeout_seconds() -> float:
+    try:
+        t = float(os.getenv("BLUEDOT_HIRA_HTTP_TIMEOUT_SEC", "22"))
+    except ValueError:
+        t = 22.0
+    return max(8.0, min(t, 60.0))
+
+
+def _hira_stale_fallback_ttl_seconds() -> float:
+    """HIRA 전부 실패 시 직전 성공 목록을 돌려줄 수 있는 최대 보관 시간."""
+    try:
+        t = float(os.getenv("BLUEDOT_HIRA_STALE_FALLBACK_TTL_SEC", "518400"))
+    except ValueError:
+        t = 518400.0
+    return max(3600.0, min(t, 2592000.0))
 
 
 def _analyze_top_nodes_workers() -> int:
@@ -736,6 +763,41 @@ def get_dummy_hospitals(lat: float, lng: float, radius: int, dept: str, count: i
     return dummy_list
 
 
+HIRA_HTTP_HEADERS = {
+    "User-Agent": "BluedotHospitalSite/1.0",
+    "Accept": "application/json",
+}
+
+
+def _hira_http_get(url: str, params: dict) -> Optional[requests.Response]:
+    """429·5xx·연결 오류 시 지수 백오프로 재시도. 마지막 응답(실패 포함) 또는 None."""
+    backoff = (0.35, 0.9, 1.8, 3.2, 5.0)
+    timeout = _hira_http_timeout_seconds()
+    last: Optional[requests.Response] = None
+    for attempt in range(len(backoff) + 1):
+        try:
+            r = requests.get(
+                url, params=params, timeout=timeout, headers=HIRA_HTTP_HEADERS
+            )
+            last = r
+            if r.status_code == 200:
+                return r
+            if r.status_code in (429, 500, 502, 503, 504) and attempt < len(backoff):
+                time.sleep(backoff[attempt])
+                continue
+            return r
+        except requests.RequestException:
+            last = None
+            if attempt < len(backoff):
+                time.sleep(backoff[attempt])
+    return last
+
+
+def _hira_result_ok(hdr: dict) -> bool:
+    c = str((hdr or {}).get("resultCode", "")).strip()
+    return c in ("00", "0")
+
+
 def _hira_fetch_hospitals_once(
     params: dict,
     dept: str,
@@ -749,17 +811,10 @@ def _hira_fetch_hospitals_once(
     HIRA getHospBasisList 1회 시도. 성공 시 (병원 dict 목록, 전문의 합) / 실패·0건 시 None.
     """
     url = "https://apis.data.go.kr/B551182/hospInfoServicev2/getHospBasisList"
-    response = None
-    backoff = (0.2, 0.55, 1.0)
-    for attempt in range(len(backoff) + 1):
-        try:
-            response = requests.get(url, params=params, timeout=14)
-            break
-        except Exception:
-            response = None
-            if attempt < len(backoff):
-                time.sleep(backoff[attempt])
+    response = _hira_http_get(url, params)
     if response is None:
+        if log_on_error:
+            logging.warning("HIRA 네트워크 실패 (dept=%s)", dept)
         return None
     if response.status_code != 200:
         if log_on_error:
@@ -768,10 +823,14 @@ def _hira_fetch_hospitals_once(
     try:
         data = response.json()
     except Exception:
+        if log_on_error:
+            logging.warning("HIRA JSON 파싱 실패 (dept=%s) 본문앞200=%r", dept, (response.text or "")[:200])
+        return None
+    if not isinstance(data, dict):
         return None
     resp = data.get("response", {})
     hdr = resp.get("header") or {}
-    if hdr.get("resultCode") != "00":
+    if not _hira_result_ok(hdr):
         if log_on_error:
             logging.warning(
                 "HIRA getHospBasisList 비정상: resultCode=%s resultMsg=%s dept=%s clCd=%s",
@@ -875,6 +934,11 @@ _HIRA_CACHE_LOCK = threading.Lock()
 _HIRA_CACHE: Dict[Tuple[float, float, int, str], Tuple[float, Tuple[list, int]]] = {}
 _HIRA_CACHE_MAX_KEYS = 320
 
+# HIRA 일시 장애·한도 초과 시 동일(그리드) 키에 대해 마지막 성공 목록을 잠시 재사용
+_HIRA_LAST_GOOD_LOCK = threading.Lock()
+_HIRA_LAST_GOOD: Dict[Tuple[float, float, int, str], Tuple[float, Tuple[list, int]]] = {}
+_HIRA_LAST_GOOD_MAX_KEYS = 400
+
 
 def _hira_cache_key(lat: float, lng: float, radius: int, dept: str) -> Tuple[float, float, int, str]:
     return (round(float(lat), 3), round(float(lng), 3), int(radius), str(dept))
@@ -909,6 +973,53 @@ def _hira_cache_set(key: Tuple[float, float, int, str], val: Tuple[list, int]) -
                 del _HIRA_CACHE[next(iter(_HIRA_CACHE))]
             except (StopIteration, KeyError):
                 break
+    _hira_last_good_store(key, val)
+
+
+def _hira_last_good_store(key: Tuple[float, float, int, str], val: Tuple[list, int]) -> None:
+    if not val or not val[0]:
+        return
+    snap = _copy_hira_tuple(val)
+    with _HIRA_LAST_GOOD_LOCK:
+        _HIRA_LAST_GOOD[key] = (time.time(), snap)
+        while len(_HIRA_LAST_GOOD) > _HIRA_LAST_GOOD_MAX_KEYS:
+            try:
+                del _HIRA_LAST_GOOD[next(iter(_HIRA_LAST_GOOD))]
+            except (StopIteration, KeyError):
+                break
+
+
+def _hira_last_good_read(key: Tuple[float, float, int, str]) -> Optional[Tuple[list, int]]:
+    now = time.time()
+    with _HIRA_LAST_GOOD_LOCK:
+        ent = _HIRA_LAST_GOOD.get(key)
+        if not ent:
+            return None
+        ts, tup = ent
+        if now - ts > _hira_stale_fallback_ttl_seconds():
+            return None
+        return _copy_hira_tuple(tup)
+
+
+def _havers_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlmb = math.radians(lng2 - lng1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlmb / 2) ** 2
+    return 2 * r * math.asin(min(1.0, math.sqrt(a)))
+
+
+def _filter_hospitals_within_km(hospitals: list, lat: float, lng: float, max_km: float) -> list:
+    out: list = []
+    for h in hospitals:
+        try:
+            d = _havers_km(lat, lng, float(h.get("lat")), float(h.get("lng")))
+        except (TypeError, ValueError):
+            continue
+        if d <= max_km + 0.05:
+            out.append(h)
+    return out
 
 
 def _merge_hira_hospital_tuples(
@@ -932,21 +1043,15 @@ def _merge_hira_hospital_tuples(
     return merged, total
 
 
-def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
+def _hira_fetch_merged_inner(
+    lat: float,
+    lng: float,
+    radius_km: int,
+    dept: str,
+) -> Optional[Tuple[list, int]]:
     """
-    심평원 HIRA: 기본은 과목(또는 종별) 필터 조회 + 반경 완화(무필터) 병합.
-    한의원(clCd=93)·치과(50)는 '무필터' 결과에 양방 의원·병원이 섞이므로 병합·clCd=31 폴백을 쓰지 않는다.
-    그 외 과목은 1차 0건일 때 반경 내 타 기관 병합으로 호버 공백을 줄인다.
+    단일 반경(km)에 대해 HIRA 조회·병합·cl31 폴백. dept는 정규화된 과목명. 캐시 없음.
     """
-    dept = _normalize_dept_for_hira(dept)
-    if dept == "동물병원":
-        return [], 0
-
-    ck = _hira_cache_key(lat, lng, radius, dept)
-    cached = _hira_cache_get(ck)
-    if cached is not None:
-        return cached
-
     clCd = "31"
     dgsbjtCd = ""
     if dept == "치과":
@@ -968,10 +1073,10 @@ def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
         dgsbjtCd = dept_codes.get(dept, "")
 
     base = {
-        "ServiceKey": urllib.parse.unquote(HIRA_API_KEY),
+        "ServiceKey": HIRA_API_KEY,
         "xPos": lng,
         "yPos": lat,
-        "radius": radius * 1000,
+        "radius": int(radius_km) * 1000,
         "numOfRows": 500,
         "_type": "json",
     }
@@ -1020,6 +1125,7 @@ def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
         merged = primary if (primary and primary[0]) else None
     else:
         merged = _merge_hira_hospital_tuples(primary, relaxed)
+
     if merged:
         if not strict_kind and not (primary and primary[0]) and (relaxed and relaxed[0]):
             logging.info(
@@ -1027,7 +1133,6 @@ def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
                 dept,
                 len(merged[0]),
             )
-        _hira_cache_set(ck, merged)
         return merged
 
     if not strict_kind:
@@ -1038,8 +1143,77 @@ def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
         )
         if got31:
             logging.info("HIRA clCd=31 단독으로 반경 목록 확보 (dept=%s)", dept)
-            _hira_cache_set(ck, got31)
             return got31
+
+    return None
+
+
+def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
+    """
+    심평원 HIRA: 기본은 과목(또는 종별) 필터 조회 + 반경 완화(무필터) 병합.
+    한의원(clCd=93)·치과(50)는 '무필터' 결과에 양방 의원·병원이 섞이므로 병합·clCd=31 폴백을 쓰지 않는다.
+    그 외 과목은 1차 0건일 때 반경 내 타 기관 병합으로 호버 공백을 줄인다.
+    실패 시: 반경 2배(최대 10km) 재조회 후 사용자 반경으로 거리 필터 → 직전 성공 스냅샷 → 추정 더미.
+    """
+    dept = _normalize_dept_for_hira(dept)
+    if dept == "동물병원":
+        return [], 0
+
+    ck = _hira_cache_key(lat, lng, radius, dept)
+    cached = _hira_cache_get(ck)
+    if cached is not None:
+        return cached
+
+    if not (os.getenv("HIRA_API_KEY") or "").strip():
+        logging.warning(
+            "HIRA_API_KEY 미설정 — 코드 내장 폴백 키로 호출합니다. "
+            "운영(Fly)에서는 fly secrets set HIRA_API_KEY=... 권장."
+        )
+
+    merged = _hira_fetch_merged_inner(lat, lng, int(radius), dept)
+    if merged:
+        _hira_cache_set(ck, merged)
+        return merged
+
+    expand_ok = os.getenv("BLUEDOT_HIRA_EXPAND_RADIUS_RETRY", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+    r_user = int(radius)
+    r2 = min(r_user * 2, 10)
+    if expand_ok and r2 > r_user:
+        merged_wide = _hira_fetch_merged_inner(lat, lng, r2, dept)
+        if merged_wide and merged_wide[0]:
+            filtered = _filter_hospitals_within_km(merged_wide[0], lat, lng, float(r_user))
+            if filtered:
+                tot = sum(int(h.get("doctors") or 1) for h in filtered)
+                tup = (filtered, tot)
+                logging.info(
+                    "HIRA 반경 확대(%skm) 후 %skm 이내 필터 (dept=%s, n=%d)",
+                    r2,
+                    r_user,
+                    dept,
+                    len(filtered),
+                )
+                _hira_cache_set(ck, tup)
+                return tup
+
+    stale = _hira_last_good_read(ck)
+    if stale and stale[0]:
+        lst, tot = stale
+        out: list = []
+        for h in lst:
+            nh = dict(h)
+            pfx = nh.get("data_source") or "hira"
+            nh["data_source"] = f"{pfx}_stale_snapshot"
+            out.append(nh)
+        logging.warning(
+            "HIRA 실패·0건 — 직전 성공 스냅샷 %d건 반환(보관 %.0f시간)",
+            len(out),
+            _hira_stale_fallback_ttl_seconds() / 3600.0,
+        )
+        return out, tot
 
     dummies = get_dummy_hospitals(lat, lng, radius, dept, 10)
     for h in dummies:
