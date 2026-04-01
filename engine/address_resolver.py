@@ -5,7 +5,7 @@
 우선순위:
 1) Kakao Local API (가능하면)
 2) 행정안전부 JUSO API
-3) 정규식 파싱(최소한 bun/ji라도 추출)  ← 마지막 보루
+3) 정규식 파싱(bun/ji) + 시군구코드가 있으면 법정동 로컬 매핑(bjdong_mapper)
 
 모든 외부 호출은 timeout=3 원칙을 적용한다.
 """
@@ -18,12 +18,13 @@ from typing import Any, Dict, Optional
 import requests
 
 from auth_config import KAKAO_REST_KEY
+from engine.bjdong_mapper import resolve_bjdong_cd
 from engine.juso_converter import convert_address_with_juso
 
 
 def _pad4(v: Any) -> str:
     s = "" if v is None else str(v).strip()
-    s = re.sub(r"\\D", "", s)
+    s = re.sub(r"\D", "", s)
     return s.zfill(4)[:4] if s else ""
 
 
@@ -32,12 +33,12 @@ def _regex_fallback(address: str, fallback_sigungu_cd: str = "") -> Dict[str, An
     s = str(address or "").strip()
     bun = None
     ji = None
-    m = re.search(r"(\\d{1,4})\\s*-\\s*(\\d{1,4})\\s*$", s)
+    m = re.search(r"(\d{1,4})\s*-\s*(\d{1,4})\s*$", s)
     if m:
         bun = _pad4(m.group(1))
         ji = _pad4(m.group(2))
     else:
-        m2 = re.search(r"(\\d{1,4})\\s*$", s)
+        m2 = re.search(r"(\d{1,4})\s*$", s)
         if m2:
             bun = _pad4(m2.group(1))
             ji = "0000"
@@ -76,7 +77,7 @@ def _kakao_convert(address: str, *, timeout: int = 3) -> Dict[str, Any]:
     road = d.get("road_address") or {}
     # b_code: 법정동코드 10자리
     b_code = str((addr.get("b_code") or road.get("b_code") or "")).strip()
-    b_code_digits = re.sub(r"\\D", "", b_code)
+    b_code_digits = re.sub(r"\D", "", b_code)
     if len(b_code_digits) >= 10:
         adm10 = b_code_digits[:10]
         sigungu_cd = adm10[:5]
@@ -115,10 +116,19 @@ def resolve_jibun_codes(address: str, fallback_sigungu_cd: str = "") -> Dict[str
     if j.get("ok"):
         j["source"] = "juso"
         return j
-    # 3) regex
+    # 3) regex (지번 추출)
     r = _regex_fallback(address, fallback_sigungu_cd=fallback_sigungu_cd)
     r["source"] = "regex"
-    # JUSO/Kakao 실패 사유를 함께 남김
     r["upstream"] = {"kakao": k.get("message"), "juso": j.get("message")}
+    # 4) 시군구(5자리)+주소 동명 → 법정동 5자리 (로컬 data/법정동코드 전체자료.txt)
+    sgg = re.sub(r"\D", "", str(r.get("sigungu_cd") or ""))
+    if len(sgg) == 5 and r.get("bun") and r.get("ji") and not (r.get("bjdong_cd") or "").strip():
+        bj = resolve_bjdong_cd(sigungu_cd=sgg, address=address)
+        if bj:
+            r["bjdong_cd"] = bj
+            r["ok"] = True
+            r["message"] = "regex+bjdong_map"
+            r["source"] = "regex+bjdong_map"
+            r["adm_cd_10"] = sgg + bj
     return r
 

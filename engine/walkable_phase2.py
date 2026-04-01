@@ -323,11 +323,13 @@ def analyze_location(
     if not cfg.use_pgr_network:
         used_fallback = True
         warn = (
-            "PostGIS+pgRouting 미연결 — 반경 근사만 사용합니다. "
-            "실도보 폴리곤은 OSM 도로망 DB를 띄운 뒤 POSTGIS_HOST 등을 설정하세요."
+            "PostGIS+pgRouting 미연결 — 지도 검색 반경으로 이미 걸러진 행정동 후보를 그대로 사용합니다. "
+            "(500m 재필터를 쓰면 후보가 1곳만 남아 Top5가 깨질 수 있어 생략) "
+            "실도보 폴리곤은 OSM 도로망 DB와 POSTGIS_HOST 설정 시 가능합니다."
         )
         polygon = walkable_polygon_stub(lat, lon, minutes)
-        filtered = _fallback_radius_filter(lat, lon, raw_rows, cfg.fallback_radius_m)
+        # 상위(main)에서 distance_km로 반경 필터 완료 — 여기서 500m로 또 자르면 배포(Fly)에서 추천 1개만 나오는 현상 발생
+        filtered = raw_rows
         persona = calculate_persona_score(filtered, clinic_type)
         return {
             "status": "success",

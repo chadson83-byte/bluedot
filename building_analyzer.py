@@ -293,7 +293,31 @@ def generate_aging_report(
             "인테리어 품질·대기 경험·주차 편의가 차별화 포인트가 될 수 있습니다."
         )
     else:
-        insight = "현재 건물 정보를 불러올 수 없습니다. (API 승인/트래픽/지번코드 확인 필요)"
+        if total == 0:
+            insight = (
+                "건물 노후화 비교를 할 경쟁 기관 목록이 없습니다. "
+                "심평원(HIRA) 연동·선택 진료과·분석 반경을 확인해 주세요."
+            )
+        elif param_missing_cnt > 0 and param_missing_cnt >= total:
+            insight = (
+                f"분석 대상 {total}곳 모두 주소→지번·법정동 코드가 부족해 건축물대장 조회를 하지 못했습니다. "
+                "카카오 주소 API·법정동코드 자료(`data/법정동코드 전체자료.txt`)를 확인하세요."
+            )
+        elif param_missing_cnt > 0:
+            insight = (
+                f"일부 기관({param_missing_cnt}곳)은 지번 코드 부족으로 대장 조회를 건너뛰었습니다. "
+                "아래 상세의 메시지·데이터 없음 목록을 참고하세요."
+            )
+        elif api_unavailable_cnt > 0:
+            insight = (
+                f"건축물대장(건축HUB) API 오류가 {api_unavailable_cnt}건 있습니다. "
+                "`DATA_GO_KR_SERVICE_KEY`·일일 한도·HTTP 403 여부를 서버와 공공데이터포털에서 확인하세요."
+            )
+        else:
+            insight = (
+                "대장에 해당 지번 표제부가 없거나 응답이 비어 있습니다. "
+                "집합건축·미등록 건축물일 수 있으며, 최종 판단은 현장 건물 확인을 권장합니다."
+            )
 
     return {
         "summary": {

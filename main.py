@@ -9,6 +9,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
 import pandas as pd
+import numpy as np
 import math
 import os
 import jwt
@@ -172,6 +173,52 @@ def haversine_distance(lat1, lon1, lat2, lon2):
         return R * 2 * math.asin(math.sqrt(a))
     except:
         return 999.0
+
+
+def haversine_distance_vectorized(lat0: float, lon0: float, lat_series: pd.Series, lon_series: pd.Series) -> pd.Series:
+    """행정동 N건 거리(km) 벡터 연산 — df.apply 대비 대용량 마스터에서 체감 속도 개선."""
+    R = 6371.0
+    lat0_r = math.radians(float(lat0))
+    lon0_r = math.radians(float(lon0))
+    lat2 = np.radians(pd.to_numeric(lat_series, errors="coerce").fillna(999.0).to_numpy(dtype=np.float64))
+    lon2 = np.radians(pd.to_numeric(lon_series, errors="coerce").fillna(999.0).to_numpy(dtype=np.float64))
+    dlat = lat2 - lat0_r
+    dlon = lon2 - lon0_r
+    a = np.sin(dlat / 2.0) ** 2 + np.cos(lat0_r) * np.cos(lat2) * np.sin(dlon / 2.0) ** 2
+    np.clip(a, 0.0, 1.0, out=a)
+    dist = R * 2.0 * np.arcsin(np.sqrt(a))
+    return pd.Series(dist, index=lat_series.index)
+
+
+def _docs_per_10k_column(df: pd.DataFrame) -> pd.Series:
+    pop = df["pop_in_10k"].astype(float)
+    doc = df["dept_doctors"].astype(float)
+    return pd.Series(np.where(pop > 0, doc / pop, 5.0), index=df.index)
+
+
+def _hira_cache_ttl_seconds() -> float:
+    try:
+        t = float(os.getenv("BLUEDOT_HIRA_CACHE_TTL_SEC", "120"))
+    except ValueError:
+        t = 120.0
+    return max(20.0, min(t, 3600.0))
+
+
+def _analyze_top_nodes_workers() -> int:
+    try:
+        n = int(os.getenv("BLUEDOT_ANALYZE_HIRA_WORKERS", "5"))
+    except ValueError:
+        n = 5
+    return max(1, min(8, n))
+
+
+def _stage2_region_worker_count(n_nodes: int) -> int:
+    try:
+        w = int(os.getenv("BLUEDOT_STAGE2_REGION_WORKERS", "4"))
+    except ValueError:
+        w = 4
+    w = max(1, min(5, w))
+    return min(w, max(1, n_nodes))
 
 
 def _dept_to_clinic_type(dept: str) -> str:
@@ -824,7 +871,6 @@ def _hira_is_distinct_facility_clcd(dept: str) -> bool:
 # 심평원: 동일 좌표·과목에 대한 짧은 호버/중복 호출을 줄여 과호출·429·타임아웃을 완화
 _HIRA_CACHE_LOCK = threading.Lock()
 _HIRA_CACHE: Dict[Tuple[float, float, int, str], Tuple[float, Tuple[list, int]]] = {}
-_HIRA_CACHE_TTL_SEC = 75.0
 _HIRA_CACHE_MAX_KEYS = 320
 
 
@@ -844,7 +890,7 @@ def _hira_cache_get(key: Tuple[float, float, int, str]) -> Optional[Tuple[list, 
         if not ent:
             return None
         ts, val = ent
-        if now - ts > _HIRA_CACHE_TTL_SEC:
+        if now - ts > _hira_cache_ttl_seconds():
             try:
                 del _HIRA_CACHE[key]
             except KeyError:
@@ -1119,6 +1165,37 @@ class MicroSiteStage2Request(BaseModel):
     nodes: List[MicroSiteStage2Node]
 
 
+def _stage2_region_cands(
+    node: MicroSiteStage2Node,
+    eval_r: int,
+    dept: str,
+    kakao_key: str,
+) -> List[Dict[str, Any]]:
+    lat, lng = float(node.lat), float(node.lng)
+    r_fetch_km = max(0.5, (eval_r + 320) / 1000.0)
+    r_fetch_km = min(r_fetch_km, 3.0)
+    hospitals, _ = fetch_real_hospitals(lat, lng, r_fetch_km, dept)
+    anchor_r = min(2000, max(eval_r * 2 + 320, 720))
+    anchors, _ = collect_anchor_pois(
+        kakao_key=kakao_key,
+        lat=lat,
+        lng=lng,
+        radius_m=anchor_r,
+    )
+    return build_region_candidate_scores(
+        center_lat=lat,
+        center_lng=lng,
+        parent_name=str(node.name or "") or "권역",
+        parent_rank=int(node.rank or 0),
+        eval_radius_m=eval_r,
+        anchors=anchors,
+        hospitals=hospitals or [],
+        dept=dept,
+        df_master=df_master,
+        resolve_master_ctx=resolve_nearest_master_context,
+    )
+
+
 class KakaoAuthRequest(BaseModel):
     access_token: str
 
@@ -1355,31 +1432,18 @@ def api_micro_site_stage2(body: MicroSiteStage2Request):
     dept = (body.department or "한의원").strip() or "한의원"
     all_cands: List[Dict[str, Any]] = []
     nodes_in = list(body.nodes)[:5]
-    for node in nodes_in:
-        lat, lng = float(node.lat), float(node.lng)
-        r_fetch_km = max(0.5, (eval_r + 320) / 1000.0)
-        r_fetch_km = min(r_fetch_km, 3.0)
-        hospitals, _ = fetch_real_hospitals(lat, lng, r_fetch_km, dept)
-        anchor_r = min(2000, max(eval_r * 2 + 320, 720))
-        anchors, _ = collect_anchor_pois(
-            kakao_key=KAKAO_REST_KEY or "",
-            lat=lat,
-            lng=lng,
-            radius_m=anchor_r,
-        )
-        cands = build_region_candidate_scores(
-            center_lat=lat,
-            center_lng=lng,
-            parent_name=str(node.name or "") or "권역",
-            parent_rank=int(node.rank or 0),
-            eval_radius_m=eval_r,
-            anchors=anchors,
-            hospitals=hospitals or [],
-            dept=dept,
-            df_master=df_master,
-            resolve_master_ctx=resolve_nearest_master_context,
-        )
-        all_cands.extend(cands)
+    kk = KAKAO_REST_KEY or ""
+    nw = _stage2_region_worker_count(len(nodes_in))
+    if nw <= 1:
+        for node in nodes_in:
+            all_cands.extend(_stage2_region_cands(node, eval_r, dept, kk))
+    else:
+        with ThreadPoolExecutor(max_workers=nw) as _st2_pool:
+            for chunk in _st2_pool.map(
+                lambda n: _stage2_region_cands(n, eval_r, dept, kk),
+                nodes_in,
+            ):
+                all_cands.extend(chunk)
     # 근접 후보도 허용(지도·리스트에서 겹칠 수 있음). 완전 동일 좌표만 소간격으로 배제.
     top5 = dedupe_pick_top(all_cands, top_k=5, min_sep_m=12.0)
     enrich_stage2_top_with_rationale(top5)
@@ -1409,8 +1473,7 @@ def api_building_aging(lat: float, lng: float, dept: str = "한의원", radius_k
     return {"status": "success", "report": report, "competitor_count": len(real_hosps or [])}
 
 
-# 상위 N개 노드: HIRA 병렬 처리(건물 노후화는 /api/building-aging 에서만).
-_ANALYZE_TOP_NODES_WORKERS = 3
+# 상위 N개 노드: HIRA 병렬 처리(건물 노후화는 /api/building-aging 에서만). 워커 수는 BLUEDOT_ANALYZE_HIRA_WORKERS
 
 
 @app.get("/api/hospitals")
@@ -1460,7 +1523,7 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
             df = df.drop_duplicates(subset=['행정구역(동읍면)별'])
 
             # 🚨 [핀셋 수술 2] 철통 지오펜싱: 바다 찍었는데 수영구/부암동 안 나오게 딱 자름!
-            df['distance_km'] = df.apply(lambda r: haversine_distance(lat, lng, r['center_lat'], r['center_lng']), axis=1)
+            df['distance_km'] = haversine_distance_vectorized(lat, lng, df['center_lat'], df['center_lng'])
             search_limit = max(float(radius) * 1.5, 1.5)
             df_filtered = df[(df['distance_km'] <= search_limit)]
 
@@ -1484,7 +1547,7 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
                 df['dept_doctors'] = pd.to_numeric(df.get(dept_docs_col + '_x', 0), errors='coerce').fillna(0) + pd.to_numeric(df.get(dept_docs_col + '_y', 0), errors='coerce').fillna(0)
             else:
                 df['dept_doctors'] = df['total_doctors']  # 폴백
-            df['docs_per_10k'] = df.apply(lambda row: row['dept_doctors'] / row['pop_in_10k'] if row['pop_in_10k'] > 0 else 5.0, axis=1)
+            df['docs_per_10k'] = _docs_per_10k_column(df)
 
             if dept == "치과":
                 df['age_score'] = (df['젊은층_비중'] / 0.35) * 20.0
@@ -1528,7 +1591,11 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
                 df['score_B_raw'] = 30.0 + df['age_B'].clip(upper=30.0) + df['pop_score'].clip(upper=20.0) + df['transit_B'].clip(upper=15.0) - df['comp_penalty'].clip(upper=35.0)
                 df['score_B'] = ((df['score_B_raw'] / 100) * 10).clip(lower=3.0, upper=9.8)
                 df['final_score'] = df[['score_A', 'score_B']].max(axis=1)
-                df['best_type'] = df.apply(lambda row: "타입A(전통/통증)" if row['score_A'] >= row['score_B'] else "타입B(미용/다이어트)", axis=1)
+                df['best_type'] = np.where(
+                    df['score_A'] >= df['score_B'],
+                    "타입A(전통/통증)",
+                    "타입B(미용/다이어트)",
+                )
 
             top_5_df = df.sort_values(by='final_score', ascending=False).head(5)
 
@@ -1628,7 +1695,7 @@ def get_analysis_data(lat: float, lng: float, dept: str, radius: int = 1, walk_m
                 )
                 return _node, real_hosps
 
-            with ThreadPoolExecutor(max_workers=_ANALYZE_TOP_NODES_WORKERS) as _pool_h:
+            with ThreadPoolExecutor(max_workers=_analyze_top_nodes_workers()) as _pool_h:
                 _pairs_h = list(_pool_h.map(_work_hospital_row, top_5_df.to_dict("records")))
             for _node_h, _rh in _pairs_h:
                 all_hospitals.extend(_rh)
@@ -1714,7 +1781,7 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
 
             df = df.drop_duplicates(subset=['행정구역(동읍면)별'])
 
-            df['distance_km'] = df.apply(lambda r: haversine_distance(lat, lng, r['center_lat'], r['center_lng']), axis=1)
+            df['distance_km'] = haversine_distance_vectorized(lat, lng, df['center_lat'], df['center_lng'])
             
             if use_region_filter:
                 df_filtered = df[df['행정구역(동읍면)별'].astype(str).str.contains(region_pattern, na=False)]
@@ -1746,7 +1813,7 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                 df['dept_doctors'] = pd.to_numeric(df.get(dept_docs_col + '_x', 0), errors='coerce').fillna(0) + pd.to_numeric(df.get(dept_docs_col + '_y', 0), errors='coerce').fillna(0)
             else:
                 df['dept_doctors'] = df['total_doctors']
-            df['docs_per_10k'] = df.apply(lambda row: row['dept_doctors'] / row['pop_in_10k'] if row['pop_in_10k'] > 0 else 5.0, axis=1)
+            df['docs_per_10k'] = _docs_per_10k_column(df)
 
             # =======================================================
             # 🚀 [로직 분기] 과목별 완벽하게 찢어진 5가지 맞춤형 스코어링 (원본 그대로 유지)
@@ -1807,7 +1874,11 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                 df['score_B'] = ((df['score_B_raw'] / 100) * 10).clip(lower=3.0, upper=9.8)
 
                 df['final_score'] = df[['score_A', 'score_B']].max(axis=1)
-                df['best_type'] = df.apply(lambda row: "타입A(전통/통증)" if row['score_A'] >= row['score_B'] else "타입B(미용/다이어트)", axis=1)
+                df['best_type'] = np.where(
+                    df['score_A'] >= df['score_B'],
+                    "타입A(전통/통증)",
+                    "타입B(미용/다이어트)",
+                )
 
             top_5_df = df.sort_values(by='final_score', ascending=False).head(5)
 
@@ -1906,7 +1977,7 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                 )
                 return _node, real_hosps
 
-            with ThreadPoolExecutor(max_workers=_ANALYZE_TOP_NODES_WORKERS) as _pool_ai:
+            with ThreadPoolExecutor(max_workers=_analyze_top_nodes_workers()) as _pool_ai:
                 _pairs_ai = list(_pool_ai.map(_work_ai_row, top_5_df.to_dict("records")))
             for _node_a, _rha in _pairs_ai:
                 all_hospitals.extend(_rha)

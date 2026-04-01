@@ -46,6 +46,57 @@ def _norm_key(s: str) -> str:
     return re.sub(r"\s+", "", str(s).strip())
 
 
+# 2글자 시·도명은 다른 지명 끝에 끼어 나오는 경우가 많음 (예: 부산「해운대구」끝의 「대구」)
+_TWO_CHAR_SIDO_TOKENS = frozenset(
+    {
+        "서울",
+        "부산",
+        "대구",
+        "인천",
+        "광주",
+        "대전",
+        "울산",
+        "세종",
+        "강원",
+        "경기",
+        "충북",
+        "충남",
+        "전북",
+        "전남",
+        "경북",
+        "경남",
+        "제주",
+    }
+)
+
+
+def _safe_suffix_match(sk: str, nr: str) -> bool:
+    """sk.endswith(nr) 허용 여부 — '부산해운대구'.endswith('대구') 같은 오매칭 차단."""
+    if not sk.endswith(nr):
+        return False
+    if len(nr) >= 4:
+        return True
+    if len(sk) <= len(nr) + 2:
+        return True
+    if nr in _TWO_CHAR_SIDO_TOKENS:
+        return False
+    return True
+
+
+def _safe_substring_match(sk: str, nr: str) -> bool:
+    """짧은 시도명이 타 지명 안에 끼어 들어가는 경우(nr in sk) 차단."""
+    if nr not in sk and sk not in nr:
+        return False
+    shorter, longer = (nr, sk) if len(nr) <= len(sk) else (sk, nr)
+    if shorter not in longer:
+        return False
+    if len(shorter) >= 4:
+        return True
+    if shorter in _TWO_CHAR_SIDO_TOKENS and len(longer) > len(shorter) + 2:
+        return False
+    return True
+
+
 def _short_sido(s: str) -> str:
     x = str(s).strip()
     for suf in ("특별자치도", "특별자치시", "광역시", "특별시", "자치시", "자치도", "도"):
@@ -239,6 +290,10 @@ def _match_region_row(sigungu_key: str, regions: List[str]) -> Optional[str]:
     best = None
     best_score = -1
     sk_s = _short_sido(sk)
+    sido_prefix = ""
+    parts_sk = sigungu_key.split()
+    if len(parts_sk) >= 1:
+        sido_prefix = _norm_key(parts_sk[0])
     for r in regions:
         nr = _norm_key(r)
         nr_s = _short_sido(nr)
@@ -246,24 +301,36 @@ def _match_region_row(sigungu_key: str, regions: List[str]) -> Optional[str]:
             return r
         if nr_s == sk_s:
             return r
-        if sk.endswith(nr) or nr.endswith(sk):
+        if _safe_suffix_match(sk, nr) or _safe_suffix_match(nr, sk):
             score = min(len(sk), len(nr))
             if score > best_score:
                 best_score, best = score, r
         elif sk_s.endswith(nr_s) or nr_s.endswith(sk_s):
+            if len(nr_s) >= 2 and len(sk_s) >= 2 and (nr_s in _TWO_CHAR_SIDO_TOKENS or sk_s in _TWO_CHAR_SIDO_TOKENS):
+                if nr_s in sk_s or sk_s in nr_s:
+                    if not _safe_substring_match(sk_s, nr_s):
+                        continue
             score = min(len(sk_s), len(nr_s))
             if score > best_score:
                 best_score, best = score, r
-        elif nr in sk or sk in nr:
+        elif _safe_substring_match(sk, nr):
             score = min(len(sk), len(nr)) // 2
             if score > best_score:
                 best_score, best = score, r
-    # 마지막 토큰만 일치 (예: 엑셀 '강릉시' vs 마스터 '강원 강릉시')
+    # 마지막 토큰 일치 — 반드시 같은 시도(첫 토큰)와 어울리는 행만 (부산 해운대 vs 대구 오매칭 방지)
     parts = sigungu_key.split()
     if len(parts) >= 2:
         short = parts[-1]
+        sn = _norm_key(short)
         for r in regions:
-            if _norm_key(short) == _norm_key(r) or _norm_key(r).endswith(_norm_key(short)):
+            if sido_prefix and not (_norm_key(r).startswith(sido_prefix) or _short_sido(_norm_key(r)).startswith(_short_sido(sido_prefix))):
+                rn = _norm_key(r)
+                r_first = r.split()[0] if r.split() else ""
+                rf = _norm_key(r_first)
+                if not (rf.startswith(sido_prefix) or sido_prefix.startswith(rf) or _short_sido(rf) == _short_sido(sido_prefix)):
+                    continue
+            nr = _norm_key(r)
+            if sn == nr or (_safe_suffix_match(nr, sn) and len(sn) >= 2):
                 return r
     return best
 

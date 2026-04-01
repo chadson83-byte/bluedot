@@ -349,10 +349,13 @@
                         <div class="results-card-slider results-card-slider--stage1" id="results-cards-container"></div>
                     </div>
                 </div>
-                <button type="button" class="results-panel-peektab no-print" tabindex="0" aria-label="분석 결과 패널 펼치기">
-                    <span class="results-panel-peektab-chev">▲</span>
-                    <span class="results-panel-peektab-text">BLUEDOT 분석 결과 (1·2단계) · <strong>마우스를 올려 펼치기</strong> · 치우면 지도 전체 보기</span>
-                </button>
+                <div class="results-panel-peekbar no-print">
+                    <button type="button" class="results-panel-peektab" tabindex="0" aria-label="분석 결과 패널 펼치기">
+                        <span class="results-panel-peektab-chev">▲</span>
+                        <span class="results-panel-peektab-text">BLUEDOT 분석 결과 (1·2단계) · <strong>마우스를 올려 펼치기</strong> · 치우면 지도 전체 보기</span>
+                    </button>
+                    <button type="button" class="results-panel-peek-close" onclick="event.stopPropagation(); closeResults();" aria-label="분석 결과 닫고 새로 분석">✕ 닫기</button>
+                </div>
             </div>
         </div>
 

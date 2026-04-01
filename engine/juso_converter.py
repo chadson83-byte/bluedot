@@ -10,14 +10,20 @@ API: https://www.juso.go.kr/addrlink/addrLinkApi.do
 
 from __future__ import annotations
 
+import os
 import re
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import requests
 
-# 사용자 제공 승인키 (요구사항: 전역 변수로 선언)
-JUSO_CONFM_KEY = "devU01TX0FVVEgyMDI2MDMyNTIyMDcwMDExNzc5MTU="
+
+def _juso_confm_key() -> str:
+    return (
+        (os.getenv("JUSO_CONFM_KEY") or "").strip()
+        or (os.getenv("JUSO_ADDR_LINK_KEY") or "").strip()
+        or "devU01TX0FVVEgyMDI2MDMyNTIyMDcwMDExNzc5MTU="
+    )
 
 JUSO_ENDPOINT = "https://www.juso.go.kr/addrlink/addrLinkApi.do"
 
@@ -57,7 +63,7 @@ def convert_address_with_juso(address: str, *, timeout: int = 8) -> Dict[str, An
         return {"ok": False, "message": "주소가 비어 있습니다.", "address": address}
 
     params = {
-        "confmKey": JUSO_CONFM_KEY,
+        "confmKey": _juso_confm_key(),
         "keyword": kw,
         "currentPage": "1",
         "countPerPage": "1",

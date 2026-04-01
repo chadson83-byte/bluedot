@@ -1019,8 +1019,10 @@ function renderStage2FullReport(payload) {
     if (toolbar) toolbar.style.display = 'flex';
     sec.style.display = 'block';
     syncReportStage2Cta();
+    /* scrollIntoView는 패널 내부 스크롤을 밀어 헤더(닫기)가 화면 밖으로 나감 → 상단으로만 리셋 */
     try {
-        sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        const slide = document.querySelector('.results-panel-slide');
+        if (slide) slide.scrollTop = 0;
     } catch (_) { /* ignore */ }
 }
 
