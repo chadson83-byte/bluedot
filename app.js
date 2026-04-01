@@ -782,6 +782,56 @@ function formatStage2Metric(v) {
     return String(v);
 }
 
+/** 네이버 부동산 매물(상가·상가주택·사무실) — 2단계 후보 좌표 연동 */
+const BLUEDOT_NAVER_LAND_ARTICLES_BASE = 'https://new.land.naver.com/articles';
+const BLUEDOT_NAVER_LAND_ZOOM = 16;
+
+function buildNaverLandArticlesUrl(lat, lng, zoom) {
+    const la = Number(lat);
+    const ln = Number(lng);
+    const z = zoom != null && zoom !== '' ? Math.round(Number(zoom)) : BLUEDOT_NAVER_LAND_ZOOM;
+    if (!Number.isFinite(la) || !Number.isFinite(ln)) return null;
+    if (la < -90 || la > 90 || ln < -180 || ln > 180) return null;
+    if (!Number.isFinite(z) || z < 1 || z > 22) return null;
+    const ms = `${la},${ln},${z}`;
+    const a = 'SG:SGJT:SM';
+    const b = 'A1:B1:B2';
+    const e = 'RETAIL';
+    const q = [
+        `ms=${encodeURIComponent(ms)}`,
+        `a=${encodeURIComponent(a)}`,
+        `b=${encodeURIComponent(b)}`,
+        `e=${encodeURIComponent(e)}`,
+    ].join('&');
+    return `${BLUEDOT_NAVER_LAND_ARTICLES_BASE}?${q}`;
+}
+
+function openNaverLandArticles(lat, lng, zoom) {
+    const url = buildNaverLandArticlesUrl(lat, lng, zoom != null ? zoom : BLUEDOT_NAVER_LAND_ZOOM);
+    if (!url) {
+        alert('유효한 좌표가 없어 네이버 부동산을 열 수 없습니다.');
+        return false;
+    }
+    const w = window.open(url, '_blank');
+    if (w) {
+        try {
+            w.opener = null;
+        } catch (_) { /* ignore */ }
+    }
+    return true;
+}
+
+window.openNaverLandForStage2Candidate = function (idx) {
+    const arr = (stage2Data && stage2Data.top_buildings) ? stage2Data.top_buildings : [];
+    const c = arr[idx];
+    if (!c) return;
+    openNaverLandArticles(c.lat, c.lng, BLUEDOT_NAVER_LAND_ZOOM);
+};
+
+window.openNaverLandFromDetailIdx = function () {
+    openNaverLandForStage2Candidate(window.__stage2DetailIdx);
+};
+
 function stage2CardTitleLines(c) {
     const sr = c.stage2_rank != null ? Number(c.stage2_rank) : 0;
     const pr = c.parent_rank != null ? Number(c.parent_rank) : null;
@@ -890,6 +940,12 @@ window.openStage2CandidateDetail = function (idx) {
         ? `<div class="stage2-detail-section-title">입지 선정 근거</div><div class="stage2-detail-rationale">${escHtml2(c.selection_rationale_ko)}</div>`
         : '';
 
+    const naverUrl = buildNaverLandArticlesUrl(c.lat, c.lng, BLUEDOT_NAVER_LAND_ZOOM);
+    const naverTitle = `네이버 부동산 매물(상가·상가주택·사무실) — ${lines.sub}`;
+    const naverBtn = naverUrl
+        ? `<button type="button" class="btn-naver-land" title="${escHtml2(naverTitle)}" onclick="window.openNaverLandFromDetailIdx()">네이버 부동산에서 매물 보기</button>`
+        : `<button type="button" class="btn-naver-land" disabled title="좌표가 없어 매물 검색을 열 수 없습니다.">네이버 부동산 (좌표 없음)</button>`;
+
     body.innerHTML = `
         <div class="stage2-detail-score-pill" style="background:${gcol}18;border:2px solid ${gcol};color:${gcol};">
             <span style="font-size:22px;">${formatStage2Metric(sc.score)}</span><span style="font-size:14px;">/100</span>
@@ -917,6 +973,7 @@ window.openStage2CandidateDetail = function (idx) {
         <div class="stage2-detail-actions no-print">
             <button type="button" class="btn-map" onclick="window.panToStage2Candidate(window.__stage2DetailIdx); closeStage2CandidateModal();">지도로 이동 · 확대</button>
             <button type="button" class="btn-rv" onclick="openStage2RoadviewFromDetailIdx()">거리뷰 (실경)</button>
+            ${naverBtn}
             <button type="button" class="btn-close2" onclick="closeStage2CandidateModal()">닫기</button>
         </div>
     `;
@@ -1023,6 +1080,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
             <td class="s2c-actions" onclick="event.stopPropagation();">
                 <button type="button" class="s2c-btn" onclick="window.openStage2CandidateDetail(${i})">상세</button>
                 <button type="button" class="s2c-btn s2c-btn-map" onclick="window.panToStage2Candidate(${i})">지도</button>
+                <button type="button" class="s2c-btn s2c-btn-naver" title="네이버 부동산 상가·사무실 매물" onclick="window.openNaverLandForStage2Candidate(${i})">부동산</button>
             </td>
         </tr>`;
     }).join('');

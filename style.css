@@ -670,8 +670,10 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     white-space: nowrap;
 }
 .s2c-actions {
-    white-space: nowrap;
+    white-space: normal;
     text-align: right;
+    min-width: 168px;
+    vertical-align: middle;
 }
 .s2c-btn {
     padding: 5px 9px;
@@ -691,6 +693,12 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     background: rgba(30, 41, 59, 0.75);
 }
 .s2c-btn-map:hover { background: rgba(51, 65, 85, 0.85); }
+.s2c-btn-naver {
+    border-color: rgba(3, 199, 90, 0.45);
+    background: rgba(3, 199, 90, 0.88);
+    color: #fff;
+}
+.s2c-btn-naver:hover { background: rgba(2, 163, 74, 0.95); }
 .stage2-table-foot {
     margin: 10px 0 0;
     font-size: 10px;
@@ -770,6 +778,14 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     background: #f8fafc;
     color: #334155;
     border-color: #cbd5e1;
+}
+.stage2-compare-wrap--light .s2c-btn-naver {
+    background: #03c75a;
+    color: #fff;
+    border-color: rgba(2, 133, 62, 0.5);
+}
+.stage2-compare-wrap--light .s2c-btn-naver:hover {
+    background: #02a54a;
 }
 .stage2-compare-wrap--light .stage2-table-foot { color: #64748b; }
 .stage2-card-slider {
@@ -1122,6 +1138,21 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
 .stage2-detail-actions .btn-rv {
     background: linear-gradient(135deg, #0ea5e9, #0284c7);
     color: #fff;
+}
+.stage2-detail-actions .btn-naver-land {
+    background: linear-gradient(135deg, #03c75a, #02a54a);
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(3, 199, 90, 0.28);
+}
+.stage2-detail-actions .btn-naver-land:hover:not(:disabled) {
+    filter: brightness(1.05);
+}
+.stage2-detail-actions .btn-naver-land:disabled {
+    background: #cbd5e1;
+    color: #64748b;
+    box-shadow: none;
+    cursor: not-allowed;
+    opacity: 0.85;
 }
 .stage2-detail-actions .btn-close2 {
     background: #f1f5f9;
