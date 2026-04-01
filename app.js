@@ -832,6 +832,22 @@ window.openNaverLandFromDetailIdx = function () {
     openNaverLandForStage2Candidate(window.__stage2DetailIdx);
 };
 
+/** 지도 우측 N 버튼·2단계 툴바: 2단계 1위 좌표 우선, 없으면 지도 중심 */
+window.openNaverLandAtMapFocus = function () {
+    const top = stage2Data && stage2Data.top_buildings;
+    if (Array.isArray(top) && top.length > 0) {
+        const first = top[0];
+        openNaverLandArticles(first.lat, first.lng, BLUEDOT_NAVER_LAND_ZOOM);
+        return;
+    }
+    if (typeof map !== 'undefined' && map && typeof map.getCenter === 'function') {
+        const c = map.getCenter();
+        openNaverLandArticles(c.getLat(), c.getLng(), BLUEDOT_NAVER_LAND_ZOOM);
+        return;
+    }
+    alert('지도를 불러온 뒤 다시 시도해 주세요.');
+};
+
 function stage2CardTitleLines(c) {
     const sr = c.stage2_rank != null ? Number(c.stage2_rank) : 0;
     const pr = c.parent_rank != null ? Number(c.parent_rank) : null;
@@ -1021,11 +1037,14 @@ function drawStage2Markers(top) {
         if (subDisp.length > 38) subDisp = subDisp.slice(0, 36) + '…';
         const safeMain = escHtml2(lines.main);
         const safeSub = escHtml2(subDisp);
-        const content = `<div class="stage2-pin-wrap" role="button" tabindex="0" onclick="window.openStage2CandidateDetail(${i})" style="--s2col:${gcol}">
+        const content = `<div class="stage2-pin-wrap" style="--s2col:${gcol}">
             <div class="stage2-pin-pulse"></div>
             <div class="stage2-pin-bubble">
-                <strong>${safeMain}</strong>
-                <span>${safeSub}</span>
+                <div class="stage2-pin-bubble-main" role="button" tabindex="0" onclick="window.openStage2CandidateDetail(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.openStage2CandidateDetail(${i});}">
+                    <strong>${safeMain}</strong>
+                    <span>${safeSub}</span>
+                </div>
+                <button type="button" class="stage2-pin-naver-btn" onclick="event.stopPropagation();window.openNaverLandForStage2Candidate(${i});" title="네이버 부동산 이 좌표 매물">네이버 매물</button>
             </div>
             <div class="stage2-pin-arrow" style="border-top-color:${gcol}"></div>
         </div>`;
@@ -1100,12 +1119,12 @@ function buildStage2CompareTableHtml(top, payload, options) {
                     <th scope="col">경쟁</th>
                     <th scope="col">앵커</th>
                     <th scope="col">거시</th>
-                    <th scope="col">보기</th>
+                    <th scope="col">보기·매물</th>
                 </tr>
             </thead>
             <tbody>${rows}</tbody>
         </table>
-        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>상세 리포트</b>가 열립니다. 넓은 비교는 상단 <b>전체 화면 비교</b>를 누르세요.</p>'}
+        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>상세 리포트</b>가 열립니다. <b>부동산</b>은 네이버 부동산(상가·사무실)로 새 탭입니다. 지도 오른쪽 <b>N</b>은 1위 좌표(또는 지도 중심) 기준입니다.</p>'}
     </div>`;
 }
 

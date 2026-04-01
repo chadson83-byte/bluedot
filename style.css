@@ -154,6 +154,15 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     font-size: 20px; font-weight: 700; color: var(--text-main); transition: 0.2s; 
 }
 .ctrl-btn:active { transform: scale(0.96); background: var(--bg-sub); }
+.ctrl-btn-naver-land {
+    background: linear-gradient(165deg, #03c75a 0%, #02a54a 100%);
+    color: #fff !important;
+    border-color: rgba(2, 133, 62, 0.35);
+    font-size: 17px;
+    font-weight: 900;
+    letter-spacing: -0.02em;
+}
+.ctrl-btn-naver-land:active { background: #029e48 !important; }
 .my-loc-btn svg { width: 20px; height: 20px; stroke: var(--brand-deep); fill: none; stroke-width: 2.2; }
 
 /* =========================================================
@@ -581,6 +590,19 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     border-color: rgba(46, 196, 182, 0.65);
 }
 .stage2-fs-btn:active { transform: scale(0.99); }
+.stage2-toolbar-naver {
+    padding: 8px 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(3, 199, 90, 0.55);
+    background: linear-gradient(135deg, #03c75a, #02a54a);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 900;
+    cursor: pointer;
+    transition: filter 0.2s, transform 0.15s;
+}
+.stage2-toolbar-naver:hover { filter: brightness(1.06); }
+.stage2-toolbar-naver:active { transform: scale(0.99); }
 .stage2-compare-scroll {
     width: 100%;
     overflow-x: auto;
@@ -919,7 +941,7 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     display: flex;
     flex-direction: column;
     align-items: center;
-    cursor: pointer;
+    cursor: default;
     transform: translateY(-4px);
     filter: drop-shadow(0 6px 14px rgba(0, 0, 0, 0.4));
 }
@@ -944,15 +966,24 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
 .stage2-pin-bubble {
     position: relative;
     z-index: 2;
-    min-width: 112px;
-    max-width: 200px;
-    padding: 8px 12px 9px;
+    min-width: 118px;
+    max-width: 210px;
+    padding: 6px 8px 8px;
     border-radius: 14px;
     background: linear-gradient(165deg, #0f172a 0%, #1e293b 100%);
     border: 3px solid var(--s2col, var(--brand-deep));
     color: #f8fafc;
     text-align: center;
     line-height: 1.25;
+}
+.stage2-pin-bubble-main {
+    cursor: pointer;
+    padding: 4px 6px 2px;
+    border-radius: 10px;
+    transition: background 0.15s;
+}
+.stage2-pin-bubble-main:hover {
+    background: rgba(255, 255, 255, 0.06);
 }
 .stage2-pin-bubble strong {
     display: block;
@@ -969,6 +1000,22 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     color: #cbd5e1;
     word-break: keep-all;
 }
+.stage2-pin-naver-btn {
+    display: block;
+    width: 100%;
+    margin-top: 6px;
+    padding: 5px 8px;
+    border: none;
+    border-radius: 8px;
+    background: #03c75a;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 900;
+    cursor: pointer;
+    letter-spacing: -0.02em;
+}
+.stage2-pin-naver-btn:hover { filter: brightness(1.08); }
+.stage2-pin-naver-btn:active { transform: scale(0.98); }
 .stage2-pin-arrow {
     position: relative;
     z-index: 2;
