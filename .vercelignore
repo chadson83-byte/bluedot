@@ -6,7 +6,12 @@ __pycache__
 .env.*
 *.db
 *.pbf
+*.osm.pbf
 south-korea*.pbf
+**/*south-korea*
+bluedot_master*.csv
+*.xlsx
+docs/
 data/
 engine/
 scripts/
