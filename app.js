@@ -392,6 +392,8 @@ let stage2RoadviewWidget = null;
 
 /** 결제 모달 완료 후 실행할 동작: macro=1단계 분석, stage2=2단계 API */
 let pendingAfterPaymentAction = null;
+/** 2단계: 정밀 리포트에서 연 1단계 권역 1곳만 보내기 위한 스냅샷 (결제 대기 중에도 유지) */
+let pendingStage2MacroSnapshot = null;
 
 /** 카카오 coord2RegionCode — idle마다 호출 시 429. 디바운스·이동 임계·간격·백오프 */
 const KAKAO_REGION_DEBOUNCE_MS = 650;
@@ -1122,10 +1124,45 @@ window.panToStage2Candidate = function (idx) {
     }, 120);
 };
 
+/** 리포트에 연 1단계 권역 → stage2 API용 단일 노드 (좌표 우선, 실패 시 rank·이름) */
+function resolveStage2MacroNodesFromSnapshot(snapshot, base) {
+    if (!Array.isArray(base) || base.length === 0) return [];
+    if (!snapshot || snapshot.lat == null || snapshot.lng == null) return [];
+    const la = Number(snapshot.lat);
+    const ln = Number(snapshot.lng);
+    if (Number.isNaN(la) || Number.isNaN(ln)) return [];
+    const EPS = 1e-4;
+    let m = base.find((r) => r && r.lat != null && r.lng != null
+        && Math.abs(Number(r.lat) - la) < EPS && Math.abs(Number(r.lng) - ln) < EPS);
+    if (m) {
+        return [{ lat: m.lat, lng: m.lng, name: m.name, rank: m.rank }];
+    }
+    const nm = String(snapshot.region_name || snapshot.name || '').trim();
+    if (snapshot.rank != null) {
+        const sameRank = base.filter((r) => r.rank === snapshot.rank);
+        if (sameRank.length === 1) {
+            const x = sameRank[0];
+            return [{ lat: x.lat, lng: x.lng, name: x.name, rank: x.rank }];
+        }
+        m = sameRank.find((r) => r.name === nm);
+        if (m) {
+            return [{ lat: m.lat, lng: m.lng, name: m.name, rank: m.rank }];
+        }
+    }
+    return [];
+}
+
 async function runStage2BuildingPickActual() {
-    const list = (currentAnalysisData || []).slice(0, 5);
-    if (!list.length) {
+    const snap = pendingStage2MacroSnapshot;
+    pendingStage2MacroSnapshot = null;
+    const base = currentAnalysisData || [];
+    if (!base.length) {
         alert('1단계 분석 결과(Top 5 권역)가 없습니다. 먼저 거시 상권 분석을 실행하세요.');
+        return;
+    }
+    const list = resolveStage2MacroNodesFromSnapshot(snap || lastOpenedReportData, base);
+    if (!list.length) {
+        alert('지금 열어둔 정밀 리포트의 권역을 찾을 수 없습니다. 결과 카드에서 해당 권역의「정밀 분석 리포트」를 연 뒤 다시 2단계를 실행해 주세요.');
         return;
     }
     closeReportModal();
@@ -1244,7 +1281,7 @@ function updatePaymentModalCopyStage2() {
     const d = document.getElementById('payment-modal-desc');
     if (pl) pl.textContent = '2단계 · 건물(후보) 입지 Top 5 분석지';
     if (d) {
-        d.innerHTML = '1단계 <b>Top 5 권역</b>을 바탕으로 권역 내 후보 좌표를 평가해 <b>건물 입지 후보 Top 5</b> 카드 분석지를 제공합니다. (추가 1회권)';
+        d.innerHTML = '지금 연 정밀 리포트의 <b>해당 1단계 권역 1곳</b> 안에서만 후보 좌표를 평가해 <b>건물 입지 후보 Top 5</b> 카드 분석지를 제공합니다. (추가 1회권)';
     }
 }
 
@@ -1319,6 +1356,11 @@ async function triggerStage2PaymentFlow() {
         alert('1단계 분석 결과(Top 5 권역)가 없습니다. 먼저 거시 상권 분석을 실행하세요.');
         return;
     }
+    if (!lastOpenedReportData || lastOpenedReportData.lat == null || lastOpenedReportData.lng == null) {
+        alert('2단계는 지금 보고 있는 정밀 리포트의 권역만 분석합니다. 먼저 Top 5 중 원하는 권역의「정밀 분석 리포트」를 여세요.');
+        return;
+    }
+    pendingStage2MacroSnapshot = { ...lastOpenedReportData };
     pendingAfterPaymentAction = 'stage2';
     updatePaymentModalCopyStage2();
     if (typeof window !== 'undefined' && window.BLUEDOT_SKIP_CREDIT_CHECK) {
@@ -1335,7 +1377,7 @@ async function triggerStage2PaymentFlow() {
         } catch (e) { credits = getCredits(); }
     }
     if (credits > 0) {
-        if (confirm(`2단계 건물(후보) 입지 분석 1회를 사용합니다. (남은 ${credits}회)\n1단계 Top 5 권역 기준으로 분석지를 받습니다. 진행할까요?`)) {
+        if (confirm(`2단계 건물(후보) 입지 분석 1회를 사용합니다. (남은 ${credits}회)\n지금 리포트에 연 1단계 권역(Top ${lastOpenedReportData && lastOpenedReportData.rank != null ? lastOpenedReportData.rank : '—'})만 대상으로 합니다. 진행할까요?`)) {
             if (token) {
                 try {
                     await useCreditViaApi();
@@ -1351,6 +1393,7 @@ async function triggerStage2PaymentFlow() {
             runStage2BuildingPickActual();
         } else {
             pendingAfterPaymentAction = null;
+            pendingStage2MacroSnapshot = null;
         }
         return;
     }
@@ -1366,6 +1409,7 @@ async function triggerStage2PaymentFlow() {
 function closePaymentModal() {
     document.getElementById('payment-modal').style.display = 'none';
     pendingAfterPaymentAction = null;
+    pendingStage2MacroSnapshot = null;
 }
 
 function selectPaymentPlan(plan) {
@@ -1407,14 +1451,16 @@ async function processPayment() {
     }
     const runAction = pendingAfterPaymentAction || 'macro';
     pendingAfterPaymentAction = null;
-    closePaymentModal();
+    document.getElementById('payment-modal').style.display = 'none';
     const stageLabel = runAction === 'stage2' ? '2단계 건물 입지' : '1단계 거시 상권';
     alert(`테스트 모드: 결제가 완료되었습니다. (${amount.toLocaleString()}원)\n분석 ${adds}회가 반영되었습니다.\n다음: ${stageLabel} 실행`);
     if (runAction === 'stage2') {
         runStage2BuildingPickActual();
     } else {
+        pendingStage2MacroSnapshot = null;
         startAnalysis();
     }
+    pendingStage2MacroSnapshot = null;
 
     /* =========================================================================
     🚨 [실전용] 포트원 연동 시 amount를 plan에 따라 7000 또는 30000으로 설정하세요.
@@ -1449,6 +1495,7 @@ function renderMapAndResults(data, searchRadius) {
     const hospitals = Array.isArray(data && data.hospitals) ? data.hospitals : [];
     currentAnalysisData = recommendations;
     currentHospitals = hospitals;
+    lastOpenedReportData = null;
 
     if (recommendations.length === 0) {
         const msg = (data && data.message) ? data.message : '분석 결과(추천 노드)가 없습니다. 반경을 넓히거나 다른 지역을 선택해 주세요.';

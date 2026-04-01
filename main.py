@@ -1929,8 +1929,10 @@ def api_micro_site(lat: float, lng: float, radius_m: int = 400, dept: str = "한
 @app.post("/api/micro-site/stage2")
 def api_micro_site_stage2(body: MicroSiteStage2Request):
     """
-    2단계: 1차에서 뽑은 최대 5개 권역 각각에 대해
-    중심+8방 125m 오프셋 후보(9점)를 두고, 권역 단위 카카오 앵커·HIRA 목록을 재사용해 미시 점수 산출 후 전역 상위 5곳 반환.
+    2단계: 1차 권역 노드별로 중심+8방 125m 오프셋 후보(9점)를 두고
+    카카오 앵커·HIRA를 재사용해 미시 점수 산출 후 상위 5곳 반환.
+    - 클라이언트는 보통 **현재 정밀 리포트에서 연 1개 권역만** nodes로 보냄 → 해당 권역 안의 Top 5.
+    - 여러 권역을 내면 후보를 합쳐 전역 Top 5(레거시/비교용).
     """
     if not body.nodes:
         raise HTTPException(status_code=400, detail="nodes가 비어 있습니다. 1단계 분석 결과를 보내 주세요.")
