@@ -67,6 +67,7 @@ LAND_USE_KAKAO_QUERIES: List[Tuple[str, str]] = [
     ("고등학교", "school"),
     ("유치원", "school"),
     ("아파트", "apartment"),
+    ("아파트단지", "apartment"),
     ("공원", "park"),
 ]
 
@@ -120,10 +121,16 @@ def evaluate_land_use_for_candidate(
     hazards: List[Dict[str, Any]],
     anchor_poi_count_100m: int,
     anchor_poi_count_300m: int,
+    *,
+    offset_dir: str = "중심",
+    offset_m: float = 0.0,
+    bank_poi_count_150m: int = 0,
+    mart_poi_count_300m: int = 0,
 ) -> Dict[str, Any]:
     """
-    하드 제외: 학교 부지·공원 부지 인접, (상업앵커 부족 시) 아파트 단지 심부 프록시.
-    이면도로: 100m 내 앵커 0이면서 300m 내 앵커 다수 → 골목·단지내부 프록시 50% 감점.
+    하드 제외: 학교·공원, 아파트 단지 심부(거리·상업전면 결합).
+    1단계 권역 '중심' + 근접 상업 無 → 단지핵·골목 후보로 강제 제외.
+    이면도로: 무앵커·중간링 앵커 등 추가 감점.
     """
     min_s = min_a = min_p = None
     for h in hazards or []:
@@ -156,29 +163,52 @@ def evaluate_land_use_for_candidate(
     ):
         hard = True
         reasons.append(f"공원부지 인접 약 {int(min_p)}m (제외)")
-    # 아파트: 대로변 상가(100m 앵커 2+)는 오탐 완화
+    nb = int(bank_poi_count_150m)
+    nmt = int(mart_poi_count_300m)
+    comm0 = anchor_poi_count_100m < 1 and nb < 1 and nmt < 1
+
+    # 아파트: 대표 POI가 멀어도 단지 내부일 수 있어 반경 확대. 상업전면(앵커·은행·마트) 있으면 완화.
     if (
         not hard
         and min_a is not None
-        and min_a < 92.0
+        and min_a < 145.0
         and anchor_poi_count_100m < 2
+        and nb < 1
     ):
         hard = True
-        reasons.append(f"아파트단지 인접 약 {int(min_a)}m (상업전면 부족 시 제외)")
+        reasons.append(f"아파트·단지 시설 인접 약 {int(min_a)}m (대로 상가 신호 부족 시 제외)")
+    # 단지와 멀어도 '상업 사막'이면 단지권 추정
+    if (
+        not hard
+        and min_a is not None
+        and min_a < 260.0
+        and comm0
+        and anchor_poi_count_300m <= 3
+    ):
+        hard = True
+        reasons.append("아파트권·상업POI 공백(300m 내 앵커 소수) → 제외")
+    # 1단계 격자 중심 = 주거 블록 중심에 가깝다는 가정 + 주변 상업 없음
+    od = (offset_dir or "중심").strip()
+    om = float(offset_m or 0.0)
+    if not hard and od == "중심" and om <= 1.0 and comm0 and anchor_poi_count_300m <= 4:
+        hard = True
+        reasons.append("권역 중심 좌표 + 근접 상업·은행·마트 없음 → 단지·내부도로 후보 제외")
 
     mult = 1.0
     if not hard and min_a is not None and min_a < 220.0 and anchor_poi_count_100m < 2:
-        # 단지 경계~중거리: 완만 감점
-        mult *= max(0.5, 0.42 + min_a / 520.0)
+        mult *= max(0.45, 0.38 + min_a / 480.0)
         reasons.append("아파트단지 중거리(상업전면 약할 때 감점)")
 
-    # 이면도로·단지내부 프록시 (도로폭 미연동): 100m 무앵커 + 300m 다앵커 = 띠 상권 바깥
-    if anchor_poi_count_100m == 0 and anchor_poi_count_300m >= 5:
-        mult *= 0.5
-        reasons.append("100m무앵커·300m앵커다수 → 이면·단지내부 프록시(50%감점)")
+    # 이면도로·단지내부: 300m 앵커 소량(띠만 있고 전면 없음)
+    if anchor_poi_count_100m == 0 and 2 <= anchor_poi_count_300m <= 5:
+        mult *= 0.38
+        reasons.append("100m무앵커·300m소량앵커 → 골목·단지내부 프록시(강감점)")
+    if anchor_poi_count_100m == 0 and anchor_poi_count_300m >= 6:
+        mult *= 0.48
+        reasons.append("100m무앵커·300m다앵커 → 상권 띠 바깥(이면) 프록시")
     elif anchor_poi_count_100m == 0 and anchor_poi_count_300m <= 1:
-        mult *= 0.72
-        reasons.append("근접 상업앵커 부족(72% 프록시)")
+        mult *= 0.62
+        reasons.append("근접 상업앵커 매우 부족")
 
     return {
         "hard_exclude": hard,
@@ -252,11 +282,19 @@ def build_region_candidate_scores(
         n_a_100 = _count_anchors_within(la, ln, 100.0, anchors)
         n_a_300 = _count_anchors_within(la, ln, 300.0, anchors)
         n_c_100 = _count_hospitals_within(la, ln, 100.0, hospitals)
-        land_use = evaluate_land_use_for_candidate(
-            la, ln, hazards, n_a_100, n_a_300
-        )
         n_bank_150 = _count_retail_within(la, ln, 150.0, bank_places)
         n_mart_300 = _count_retail_within(la, ln, 300.0, mart_places)
+        land_use = evaluate_land_use_for_candidate(
+            la,
+            ln,
+            hazards,
+            n_a_100,
+            n_a_300,
+            offset_dir=dir_label,
+            offset_m=float(dist_m),
+            bank_poi_count_150m=n_bank_150,
+            mart_poi_count_300m=n_mart_300,
+        )
         ctx = None
         if df_master is not None and hasattr(df_master, "empty") and not df_master.empty:
             try:
@@ -389,13 +427,25 @@ def enrich_stage2_top_with_rationale(rows: List[Dict[str, Any]]) -> None:
         row["selection_rationale_ko"] = build_stage2_selection_rationale_ko(row)
 
 
+def _stage2_candidate_sort_key(c: Dict[str, Any]) -> Tuple[float, float, int, int, int]:
+    """동일 총점이면 좌표 기준 상업활력·근접 앵커가 높은 후보를 우선(골목·단지 동점 탈출)."""
+    sc = c.get("scoring") or {}
+    score = float(sc.get("score") or 0)
+    na100 = int(c.get("anchor_poi_count_100m") or 0)
+    na300 = int(c.get("anchor_poi_count_300m") or 0)
+    nb = int(c.get("bank_poi_count_150m") or 0)
+    nm = int(c.get("mart_poi_count_300m") or 0)
+    vit = _commercial_vitality_01(na100, na300, nb, nm)
+    return (-score, -vit, -na100, -nb, -nm)
+
+
 def dedupe_pick_top(
     candidates: List[Dict[str, Any]],
     *,
     top_k: int = 5,
     min_sep_m: float = 55.0,
 ) -> List[Dict[str, Any]]:
-    ranked = sorted(candidates, key=lambda c: float((c.get("scoring") or {}).get("score") or 0), reverse=True)
+    ranked = sorted(candidates, key=_stage2_candidate_sort_key)
 
     def _pick_pool(pool: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         out: List[Dict[str, Any]] = []
@@ -751,6 +801,33 @@ DEFAULT_ANCHOR_BRANDS: List[Tuple[str, str]] = [
 _CORNER_DIAGONAL = frozenset({"북동", "남동", "남서", "북서"})
 
 
+def _commercial_vitality_01(
+    anchor_100: int,
+    anchor_300: int,
+    bank_150: int,
+    mart_300: int,
+) -> float:
+    """후보 좌표 기준 상업 신호 0~1. 행정동 유동 프록시를 좌표에 맞게 내리는 데 사용."""
+    v = 0.0
+    if anchor_100 >= 2:
+        v += 0.56
+    elif anchor_100 >= 1:
+        v += 0.34
+    if anchor_300 >= 10:
+        v += 0.3
+    elif anchor_300 >= 6:
+        v += 0.2
+    elif anchor_300 >= 3:
+        v += 0.1
+    elif anchor_300 >= 1:
+        v += 0.05
+    if bank_150 >= 1:
+        v += 0.2
+    if mart_300 >= 1:
+        v += 0.16
+    return min(1.0, v)
+
+
 def score_proptech_clinic_site(
     *,
     lat: float,
@@ -798,9 +875,10 @@ def score_proptech_clinic_site(
                 "parking_infrastructure": 0.0,
             },
             "scoring_meta": {
-                "method": "proptech_clinic_v3_dual_poi",
+                "method": "proptech_clinic_v4_street_scaled",
                 "notes": notes,
                 "hard_excluded": True,
+                "commercial_vitality_01": 0.0,
             },
         }
 
@@ -833,6 +911,25 @@ def score_proptech_clinic_site(
     if young_ratio is not None and float(young_ratio) >= 0.36:
         foot = min(28.0, foot + 2.0)
 
+    # 동일 동 안에서도 후보별로 상업전면이 다름 → 행정동 유동을 좌표 상업활력으로 스케일(스크린샷 이슈)
+    na1_ft = int(anchor_poi_count_100m)
+    na3_ft = int(anchor_poi_count_300m)
+    nb_ft = int(bank_poi_count_150m)
+    nm_ft = int(mart_poi_count_300m)
+    vit = _commercial_vitality_01(na1_ft, na3_ft, nb_ft, nm_ft)
+    if vit < 0.1:
+        foot = min(foot, 6.0)
+        notes.append(
+            "유동 보정: 해당 좌표 100~300m 내 앵커·은행·마트가 거의 없어, 행정동 유동 프록시를 대폭 축소(골목·단지내부)."
+        )
+    elif vit < 0.24:
+        foot = min(foot, 10.0)
+        notes.append("유동 보정: 상업 POI 신호 미약 → 행정동 유동 프록시 상한 축소.")
+    else:
+        foot = foot * (0.22 + 0.78 * vit)
+        if vit < 0.5:
+            notes.append("유동 보정: 행정동 프록시 × 좌표별 상업활력(앵커·은행·마트) 가중.")
+
     # 2) 가시성·접근 (max 20) — 코너=격자 오프셋 방향 프록시, 횡단보도=버스정류장 밀도 프록시
     corner = 0.0
     od = (offset_dir or "중심").strip()
@@ -851,6 +948,11 @@ def score_proptech_clinic_site(
         notes.append("횡단보도: POI 미연동 → 해당 행정동 버스정류장 수로 보행·접근성 프록시.")
     else:
         notes.append("횡단보도: 버스정류장 수 없음 → 0점(데이터 공백).")
+    # 동일 동·동일 버스 정류장 수인데 골목은 대로가 아님 → 무앵커일 때 버스 프록시 축소
+    if na1_ft == 0:
+        cross *= 0.22 + 0.14 * min(1.0, na3_ft / 8.0)
+        if cross > 0 and cross < 10.0:
+            notes.append("가시성 보정: 100m 무앵커 → 행정동 버스정류장 프록시 축소(이면도로).")
     visibility = min(20.0, corner + cross)
 
     # 3) 배후 주거 (max 20) — 행정동 중심 프록시이나, 무앵커 전면이면 과대가점 방지(상업입지 우선)
@@ -892,10 +994,10 @@ def score_proptech_clinic_site(
         )
 
     # 5) 메디컬 시너지 (max 10) — 동일 과목 HIRA 목록 100m (타 진료과·약국은 미포함)
-    nm = int(medical_facility_count_100m)
-    if nm >= 5:
+    n_med = int(medical_facility_count_100m)
+    if n_med >= 5:
         med = 10.0
-    elif nm >= 2:
+    elif n_med >= 2:
         med = 7.0
     else:
         med = 3.0
@@ -950,11 +1052,12 @@ def score_proptech_clinic_site(
             "parking_infrastructure": round(park, 1),
         },
         "scoring_meta": {
-            "method": "proptech_clinic_v3_dual_poi",
+            "method": "proptech_clinic_v4_street_scaled",
             "notes": notes,
             "anchor_poi_count_300m": int(anchor_poi_count_300m),
             "bank_poi_count_150m": int(bank_poi_count_150m),
             "mart_poi_count_300m": int(mart_poi_count_300m),
+            "commercial_vitality_01": round(vit, 3),
         },
     }
 
