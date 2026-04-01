@@ -670,22 +670,158 @@ def _mask_clinic_name(name: str, dept: str, mask_first_only: bool = True) -> str
     return name[0] + "*** " + dept
 
 
-def _build_fact_tags(doctor_count: int, hours_tag: str, dept: str) -> list:
-    """365일, 야간, 원장 N인, 특화, 프랜차이즈 등 팩트 기반 태그. V8: 인허가·NPS 연동."""
-    tags = []
+def _hira_optional_int(item: dict, *keys: str) -> Optional[int]:
+    """HIRA item에서 첫 유효 정수(여러 키·대소문자 변형 시도)."""
+    for k in keys:
+        for kk in (k, k.lower() if k != k.lower() else k):
+            if kk not in item:
+                continue
+            try:
+                v = item.get(kk)
+                if v is None or v == "":
+                    continue
+                return int(float(v))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _hira_optional_yn_true(item: dict, *keys: str) -> bool:
+    """값이 Y/1/예 등이면 True. 미존재·알 수 없음은 False(보수적, 태그만 보조)."""
+    for k in keys:
+        for kk in (k, k.lower() if k != k.lower() else k):
+            if kk not in item:
+                continue
+            s = str(item.get(kk)).strip().upper()
+            if s in ("Y", "1", "YES", "TRUE", "예"):
+                return True
+    return False
+
+
+def _nurse_intensity_revenue_mult(doctor_count: int, nurse_count: Optional[int]) -> float:
+    """의사당 간호·조무 신고 인력이 많을수록 운영 규모 프록시로 소폭 가산(상한)."""
+    if doctor_count <= 0 or nurse_count is None or nurse_count < 0:
+        return 1.0
+    r = float(nurse_count) / float(doctor_count)
+    if r >= 3.5:
+        return 1.12
+    if r >= 2.5:
+        return 1.08
+    if r >= 1.5:
+        return 1.04
+    return 1.0
+
+
+def _name_keyword_revenue_signals(raw_name: str, dept: str) -> Tuple[float, List[str]]:
+    """
+    상호에 드러난 키워드로 매출 배율·태그(약한 신호). 실제 전문과 여부와 불일치할 수 있음.
+    배율 합산 상한은 호출 측에서 clamp.
+    """
+    mult = 1.0
+    tags: List[str] = []
+    n = str(raw_name or "")
+    d = _normalize_dept_for_hira(dept)
+    if d == "치과":
+        if any(k in n for k in ("교정", "ortho", "Orthodont")):
+            mult *= 1.1
+            tags.append("교정 키워드(상호)")
+        if any(k in n for k in ("임플", "implant", "Implant", "임플란트")):
+            mult *= 1.08
+            tags.append("임플란트 키워드(상호)")
+    elif d == "한의원":
+        if any(k in n for k in ("입원", "한방병원", "침복합")):
+            mult *= 1.12
+            tags.append("입원·병원급 키워드(상호)")
+        if "도수" in n or "추나" in n:
+            mult *= 1.05
+            tags.append("도수·추나 키워드(상호)")
+    elif d == "피부과":
+        if any(k in n for k in ("성형", "뷰티", "클리닉", "피부과")):
+            mult *= 1.06
+            tags.append("미용·클리닉 키워드(상호)")
+    elif d == "정형외과":
+        if "척추" in n or "관절" in n:
+            mult *= 1.05
+            tags.append("전문부위 키워드(상호)")
+    return mult, tags[:4]
+
+
+def _hira_parking_revenue_mult(item: dict) -> Tuple[float, Optional[str]]:
+    """주차대수 등이 있으면 소폭 가산(접근성·규모 프록시). 키는 API 버전별 상이."""
+    n = _hira_optional_int(
+        item,
+        "parkCnt",
+        "parkQty",
+        "parkXpnsCnt",
+        "prchCnt",
+        "parkEtcCnt",
+    )
+    if n is None or n <= 0:
+        return 1.0, None
+    # 30대 +3%, 100대 이상 +6% 캡
+    extra = min(0.06, 0.03 + (n / 1000.0) * 0.03)
+    return 1.0 + extra, f"주차 {n}대(신고)"
+
+
+def _schedule_tags_from_hira(item: dict) -> List[str]:
+    """진료·수납 일정 Y/N 필드가 있으면 태그만 추가(매출 배율은 소폭)."""
+    tags: List[str] = []
+    if _hira_optional_yn_true(item, "trmtSatYn", "TrmtSatYn", "rcvSatYn", "RcvSatYn"):
+        tags.append("토·토수납 등(신고)")
+    if _hira_optional_yn_true(item, "trmtSunYn", "TrmtSunYn", "rcvSunYn"):
+        tags.append("일요(신고)")
+    return tags[:2]
+
+
+def _schedule_revenue_mult(item: dict) -> float:
+    m = 1.0
+    if _hira_optional_yn_true(item, "trmtSatYn", "TrmtSatYn", "rcvSatYn", "RcvSatYn"):
+        m *= 1.025
+    if _hira_optional_yn_true(item, "trmtSunYn", "TrmtSunYn", "rcvSunYn"):
+        m *= 1.02
+    return m
+
+
+def _build_fact_tags(
+    doctor_count: int,
+    hours_tag: str,
+    dept: str,
+    *,
+    extra_tags: Optional[List[str]] = None,
+) -> list:
+    """
+    표시용 태그. 실제 야간·365 여부는 별도 인허가/진료시간 API 없이 단정하지 않음.
+    다의원은 '규모·교대 가능성' 정도만 표현.
+    """
+    tags: List[str] = []
     if doctor_count >= 3:
-        tags.append("365일 운영")
+        tags.append("다의원 규모(운영·교대 확대 가능성)")
+    elif doctor_count == 2:
+        tags.append("공동개원 규모")
     elif "야간" in hours_tag or "365" in hours_tag:
-        tags.append("야간진료")
-    tags.append(f"원장 {doctor_count}인")
-    # 허위/추정 태그(랜덤)는 표시하지 않음: 실데이터 연동 후에만 제공
-    return tags
+        tags.append("진료시간(규모 추정)")
+    tags.append(f"의사 {doctor_count}명")
+    if extra_tags:
+        for t in extra_tags:
+            if t and t not in tags:
+                tags.append(t)
+    return tags[:8]
 
 
-def _hospital_revenue_and_detail(doctor_count: int, staff_count: int, established_years: int, dept: str) -> tuple:
+def _hospital_revenue_and_detail(
+    doctor_count: int,
+    staff_count: int,
+    established_years: int,
+    dept: str,
+    *,
+    extra_mult: float = 1.0,
+    staff_role_label: str = "간호·조무 등",
+) -> tuple:
     """
     매출 추정(휴리스틱, 랜덤 금지).
-    - 실데이터가 없는 구간이므로 '추정'임을 전제로, 입력(의사/직원/연차/과목)만으로 결정론적으로 산출.
+    - 심평원 기본목록에는 통상 전문의 수·간호조무사 신고·개업일 정도만 안정적으로 옴.
+    - 야간·365·입원·교정 전문 여부는 별도 상세 API·인허가·플레이스와 결합해야 정밀화 가능.
+    - extra_mult: 간호/의사 비, 상호 키워드, 주차·진료일정 등 약한 신호 합산(상한 적용).
     """
     # 과목별 월 매출 기여(원) 가정치(보수적)
     base_per_doc_map = {
@@ -701,11 +837,16 @@ def _hospital_revenue_and_detail(doctor_count: int, staff_count: int, establishe
         "정신건강의학과": 42000000,
     }
     base_per_doc = float(base_per_doc_map.get(dept, 40000000))
-    # 직원 생산성 가정(원/월) — 데이터 없으므로 보수적, 결정론
+    # 간호·조무 등 신고 인력 1인당 월 생산성 가정(원) — 보수적
     staff_weight = 18000000.0
     rev_base = doctor_count * base_per_doc + float(max(0, staff_count)) * staff_weight
     year_bonus = 1.0 + min(0.35, max(0, established_years) * 0.02)  # 18년차까지 +35%
-    rev_total = int(rev_base * year_bonus)
+    em = float(extra_mult)
+    if em < 0.85:
+        em = 0.85
+    if em > 1.28:
+        em = 1.28
+    rev_total = int(rev_base * year_bonus * em)
     if rev_total >= 100000000:
         rev_str = f"월 추정 {rev_total // 100000000}억"
     else:
@@ -717,7 +858,10 @@ def _hospital_revenue_and_detail(doctor_count: int, staff_count: int, establishe
         year_label = f"{established_years}년차 안정"
     else:
         year_label = f"{established_years}년차 신규"
-    detail_label = f"(의사 {doctor_count}명, 직원 {staff_count}명) | {year_label} | {rev_str}"
+    staff_disp = str(staff_count) if staff_count is not None else "미상"
+    detail_label = (
+        f"(의사 {doctor_count}명, {staff_role_label} {staff_disp}) | {year_label} | {rev_str}"
+    )
     return rev_str, detail_label, rev_man
 
 
@@ -738,7 +882,14 @@ def get_dummy_hospitals(lat: float, lng: float, radius: int, dept: str, count: i
         else:
             hours_tag = "🕒 일반 진료시간 (1인원장)"
         
-        rev_str, detail_label, rev_man = _hospital_revenue_and_detail(doctor_count, staff_count, established_years, dept)
+        rev_str, detail_label, rev_man = _hospital_revenue_and_detail(
+            doctor_count,
+            staff_count,
+            established_years,
+            dept,
+            extra_mult=1.0,
+            staff_role_label="직원(추정)",
+        )
         fact_tags = _build_fact_tags(doctor_count, hours_tag, dept)
         raw_name = f"경쟁 {dept} (AI추정)"
         display_name = _mask_clinic_name(raw_name, dept)
@@ -874,18 +1025,41 @@ def _hira_fetch_hospitals_once(
             established_years = 0
 
         if doctor_count >= 3:
-            hours_tag = "🕒 365일/야간진료 (대형)"
+            hours_tag = "🕒 다의원·대규모(실제 진료시간은 별도 확인)"
         elif doctor_count == 2:
-            hours_tag = "🕒 주 6일/평일야간 (공동개원)"
+            hours_tag = "🕒 공동개원 규모(진료시간은 별도 확인)"
         else:
-            hours_tag = "🕒 일반 진료시간 (1인원장)"
+            hours_tag = "🕒 1인 원장(진료시간은 별도 확인)"
+
+        raw_name = item.get("yadmNm", f"경쟁 {dept}")
+        name_mult, kw_tags = _name_keyword_revenue_signals(raw_name, dept)
+        nurse_mult = _nurse_intensity_revenue_mult(doctor_count, staff_count)
+        park_mult, park_tag = _hira_parking_revenue_mult(item)
+        sched_mult = _schedule_revenue_mult(item)
+        sched_tags = _schedule_tags_from_hira(item)
+        combined = float(name_mult) * float(nurse_mult) * float(park_mult) * float(sched_mult)
+        combined = max(0.85, min(1.28, combined))
 
         rev_str, detail_label, rev_man = _hospital_revenue_and_detail(
-            doctor_count, int(staff_count or 0), established_years, dept
+            doctor_count,
+            int(staff_count or 0),
+            established_years,
+            dept,
+            extra_mult=combined,
+            staff_role_label="간호·조무 등",
         )
-        raw_name = item.get("yadmNm", f"경쟁 {dept}")
         display_name = _mask_clinic_name(raw_name, dept)
-        fact_tags = _build_fact_tags(doctor_count, hours_tag, dept)
+        extra_tag_list: List[str] = list(kw_tags)
+        if park_tag:
+            extra_tag_list.append(park_tag)
+        extra_tag_list.extend(sched_tags)
+        fact_tags = _build_fact_tags(
+            doctor_count, hours_tag, dept, extra_tags=extra_tag_list
+        )
+
+        npd = None
+        if staff_count is not None and doctor_count > 0:
+            npd = round(float(staff_count) / float(doctor_count), 2)
 
         h = {
             "id": item.get("ykiho", str(random.randint(1000, 9999))),
@@ -901,6 +1075,21 @@ def _hira_fetch_hospitals_once(
             "estimated_revenue": rev_str,
             "estimated_revenue_man": rev_man,
             "detail_label": detail_label,
+            "revenue_estimate_meta": {
+                "model": "heuristic_v2",
+                "nurse_per_doctor": npd,
+                "combined_mult": round(combined, 4),
+                "components": {
+                    "name_keywords": round(float(name_mult), 4),
+                    "nurse_intensity": round(float(nurse_mult), 4),
+                    "parking": round(float(park_mult), 4),
+                    "schedule_yn": round(float(sched_mult), 4),
+                },
+                "disclaimer": (
+                    "심평원 병원기본목록 한계: 실제 야간·365·입원실·교정전문 등은 "
+                    "상세 API·인허가·플레이스와 결합해야 정밀 추정 가능"
+                ),
+            },
             "established_date_raw": str(item.get("estbDd", "")).strip() or None,
             "op_status": "영업중",
             "address": str(item.get("addr", "")).strip() or None,
