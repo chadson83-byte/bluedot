@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
     
     <meta name="color-scheme" content="light only">
-    <meta name="theme-color" content="#0f172a">
+    <meta name="theme-color" content="#004085">
     
     <title>BLUEDOT - 스마트 개원 입지 분석 솔루션</title>
     
@@ -63,7 +63,7 @@
         }
         .spinner {
             width: 60px; height: 60px; border: 5px solid rgba(255,255,255,0.2);
-            border-top: 5px solid #10B981; border-radius: 50%; animation: spin 1s linear infinite;
+            border-top: 5px solid #004085; border-radius: 50%; animation: spin 1s linear infinite;
         }
         @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
 
@@ -103,16 +103,16 @@
         
         /* 🚀 A4 리포트 페이퍼 디자인 (PDF 뷰어 스타일) */
         #report-modal {
-            background: #525659; overflow-y: auto; padding: 40px 20px; align-items: flex-start;
+            background: #3d4d62; overflow-y: auto; padding: 40px 20px; align-items: flex-start;
             z-index: 9000;
         }
         .a4-paper {
             width: 100%; max-width: 210mm; min-height: 297mm; margin: 0 auto;
-            background: white; box-shadow: 0 10px 30px rgba(0,0,0,0.5); padding: 20mm;
-            position: relative; color: #1e293b; font-family: 'Pretendard', sans-serif;
+            background: white; box-shadow: 0 16px 48px rgba(0,0,0,0.35); padding: 20mm;
+            position: relative; color: #1e293b; font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, sans-serif;
         }
-        .report-section { margin-bottom: 24px; border-bottom: 1px solid #e2e8f0; padding-bottom: 20px; }
-        .report-title { font-size: 26px; font-weight: 900; color: #0f172a; border-bottom: 3px solid #0f172a; padding-bottom: 12px; margin-bottom: 24px; }
+        .report-section { margin-bottom: 26px; border-bottom: 1px solid #eef2f6; padding-bottom: 22px; }
+        .report-title { display: none; }
         .data-source-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
         .data-source-item { background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; font-size: 12px; }
 
@@ -275,7 +275,7 @@
             </div>
             <div style="display:flex; gap:8px; margin-bottom:12px;">
                 <input type="text" id="region-search-input" placeholder="주소 또는 장소를 입력하세요" style="flex:1; padding:12px; border:1px solid #e2e8f0; border-radius:8px; font-size:15px;" onkeypress="if(event.keyCode===13) executeRegionSearch()">
-                <button type="button" onclick="executeRegionSearch()" style="padding:12px 16px; background:#10B981; color:white; border:none; border-radius:8px; font-weight:700; cursor:pointer;">검색</button>
+                <button type="button" onclick="executeRegionSearch()" style="padding:12px 16px; background:#004085; color:white; border:none; border-radius:8px; font-weight:700; cursor:pointer;">검색</button>
             </div>
             <div id="region-search-results" style="flex:1; overflow-y:auto; min-height:120px; border:1px solid #f1f5f9; border-radius:8px; padding:0 12px;"></div>
             <button type="button" onclick="closeRegionModal()" style="width:100%; margin-top:12px; padding:12px; background:#e2e8f0; border:none; border-radius:8px; cursor:pointer;">닫기</button>
@@ -292,7 +292,7 @@
     <div id="app">
         <header class="top-bar">
             <div class="top-bar-content">
-                <div class="app-logo" style="font-weight: 900; color: #0f172a;">🔵 BLUEDOT</div>
+                <div class="app-logo">BLUEDOT</div>
                 <div class="region-selector" onclick="openRegionModal()">
                     <span id="current-region-text">위치 탐색 중...</span>
                     <svg class="icon-down" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"></path></svg>
@@ -323,12 +323,12 @@
                 <div class="results-panel-slide">
                     <div class="results-header">
                         <div style="flex: 1; min-width: 0;">
-                            <h2 style="color: white; font-size: 20px; font-weight: 800;">1단계 · 상위 추천 상권 (Top 5)</h2>
-                            <div style="color: #10B981; font-size: 11px; font-weight: 600; margin-top: 4px;">✔ 4대 공공데이터 교차 검증 완료</div>
-                            <div style="color: #94a3b8; font-size: 10px; font-weight: 600; margin-top: 6px;">지도 핀·카드로 권역을 확인한 뒤, 정밀 리포트 하단에서 2단계(미시 입지)를 실행할 수 있습니다.</div>
+                            <h2 class="results-title-main">1단계 · 상위 추천 상권 (Top 5)</h2>
+                            <div class="results-title-sub">4대 공공데이터 교차 검증</div>
+                            <div class="results-title-hint">지도 핀·카드로 권역을 확인한 뒤, 정밀 리포트에서 2단계(미시 입지)를 실행할 수 있습니다.</div>
                         </div>
                         <div class="results-header-actions">
-                            <div class="results-close-x" onclick="closeResults()">✕ 닫기</div>
+                            <div class="results-close-x" onclick="closeResults()">닫기</div>
                         </div>
                     </div>
                     <div id="stage2-report-section" class="stage2-report-section" style="display: none;">
@@ -460,23 +460,21 @@
         </div>
 
         <div id="report-modal" class="modal-overlay" style="display:none;">
-            <div class="a4-paper" id="a4-document">
-                <div class="no-print" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px dashed #cbd5e1;">
-                    <div style="font-size: 13px; color: #64748b; font-weight: 700;">※ 본 보고서는 A4 출력에 최적화되어 있습니다.</div>
-                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                        <button onclick="window.print()" style="padding: 10px 16px; background: #0f172a; color: white; border: none; border-radius: 6px; font-weight: 800; cursor: pointer; display: flex; align-items: center; gap: 6px;">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
+            <div class="a4-paper report-editorial" id="a4-document">
+                <div class="no-print report-toolbar">
+                    <div class="report-toolbar-note">A4 인쇄·PDF 저장에 맞춘 레이아웃입니다.</div>
+                    <div class="report-toolbar-actions">
+                        <button type="button" class="btn-report-primary" onclick="window.print()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="6 9 6 2 18 2 18 9"></polyline><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path><rect x="6" y="14" width="12" height="8"></rect></svg>
                             PDF 저장 / 인쇄
                         </button>
-                        <button id="report-save-btn" onclick="saveCurrentReport()" style="display:none; padding: 10px 16px; background: #10B981; color: white; border: none; border-radius: 6px; font-weight: 800; cursor: pointer;">리포트 저장</button>
-                        <button onclick="closeReportModal()" style="padding: 10px 16px; background: #e2e8f0; color: #1e293b; border: none; border-radius: 6px; font-weight: 800; cursor: pointer;">닫기</button>
+                        <button type="button" id="report-save-btn" class="btn-report-save" onclick="saveCurrentReport()" style="display:none;">리포트 저장</button>
+                        <button type="button" class="btn-report-ghost" onclick="closeReportModal()">닫기</button>
                     </div>
                 </div>
 
-                <div class="report-title">
-                    <div style="font-size: 14px; font-weight: 800; color: #10B981; margin-bottom: 4px;">BLUEDOT Medical Intelligence</div>
-                    개원 입지 타당성 정밀 분석 리포트
-                </div>
+                <div class="report-hero-title">BLUEDOT Medical Intelligence</div>
+                <h1 class="report-h1">개원 입지 타당성 정밀 분석 리포트</h1>
 
                 <!-- 자동차보험 진료건수 (car2024.xlsx) 전국 대비 · 시군구 순위 -->
                 <div id="report-car-insurance-banner" class="report-section" style="display: none; margin-top: 12px; margin-bottom: 8px; padding: 16px 18px; border-radius: 12px; border: 2px solid #0ea5e9; background: linear-gradient(135deg, #ecfeff 0%, #f0f9ff 100%);">
@@ -509,18 +507,18 @@
 
                 <!-- 🚀 B2B: 상권 밸런스(레이더) + 손익분기(BEP) -->
                 <div class="report-section" id="report-consulting-premium">
-                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #6366f1; padding-left: 8px;">📐 상권 밸런스 &amp; CFO 손익분기 시뮬레이션</h3>
+                    <h3 class="report-h3">상권 밸런스 &amp; CFO 손익분기 시뮬레이션</h3>
                     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: stretch;" class="report-radar-bep-grid">
-                        <div style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 16px; background: linear-gradient(180deg, #fafafa 0%, #fff 100%);">
-                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 8px; color: #475569; text-align: center;">6각 상권 밸런스 (10점 만점 정규화)</div>
-                            <div style="height: 260px; position: relative;">
+                        <div class="radar-chart-card">
+                            <div class="radar-chart-card__title">6각 상권 밸런스 (10점 만점)</div>
+                            <div class="radar-chart-card__canvas">
                                 <canvas id="radarBalanceChart"></canvas>
                             </div>
-                            <div style="font-size: 10px; color: #94a3b8; text-align: center; margin-top: 4px;">※ V8: KOSIS·SGIS·TASIS 실데이터로 치환 예정</div>
+                            <div class="radar-chart-card__foot">축: 주거·유동·경쟁우위·소비·고용·접근성 등 정규화 지표</div>
                         </div>
-                        <div style="border: 1px solid #e2e8f0; border-radius: 12px; padding: 18px; background: #fafafa;">
-                            <div style="font-size: 13px; font-weight: 800; margin-bottom: 12px; color: #0f172a;">💼 손익분기점(BEP) 추정</div>
-                            <div id="bep-simulation-box" style="font-size: 13px; line-height: 1.65; color: #334155;">
+                        <div style="border: 1px solid #e2e8f0; border-radius: 14px; padding: 18px; background: #fafbfc;">
+                            <div class="report-h3 report-h3--mint" style="margin-bottom: 12px; border-left-width: 3px; padding-left: 8px; font-size: 14px;">손익분기점(BEP) 추정</div>
+                            <div id="bep-simulation-box" class="bep-table-wrap" style="font-size: 13px; line-height: 1.65; color: #334155;">
                                 <p style="color:#94a3b8;">분석 데이터를 불러오는 중입니다…</p>
                             </div>
                         </div>
@@ -601,11 +599,10 @@
                 </div>
 
                 <div class="report-section">
-                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; border-left: 4px solid #3b82f6; padding-left: 8px;">📈 세부 평가 산출 근거 (White-box Algorithm)</h3>
-                    <div style="font-size: 13px; color: #64748b; margin-bottom: 12px;">본 평가 점수는 아래 4가지 핵심 지표의 가중합산 후 리스크를 차감하여 산출되었습니다.</div>
-                    <div style="background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 16px;">
-                        <div id="report-formula-breakdown" style="display: flex; flex-direction: column; gap: 12px; font-size: 14px; font-weight: 600;">
-                            </div>
+                    <h3 class="report-h3">세부 평가 산출 근거 (White-box)</h3>
+                    <p style="font-size: 13px; color: #64748b; margin: -6px 0 14px; font-weight: 600; line-height: 1.5;">가중 합산 후 리스크·경쟁 감점을 적용해 최종 점수를 산출합니다.</p>
+                    <div class="algo-breakdown-box">
+                        <div id="report-formula-breakdown"></div>
                     </div>
                 </div>
 
@@ -632,19 +629,20 @@
                 </div>
 
                 <!-- Phase 3: Risk Warning (상권 진입 Check Point) -->
-                <div class="report-section" id="report-risk-warnings-section" style="border: 2px solid #fecaca; border-radius: 12px; background: linear-gradient(180deg, #fef2f2 0%, #fee2e2 100%); padding: 20px;">
-                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 12px; color: #b91c1c; display: flex; align-items: center; gap: 8px;">
-                        <span>⚠️</span> 상권 진입 Check Point
+                <div class="report-section report-checkpoint" id="report-risk-warnings-section">
+                    <h3 class="report-checkpoint__title">
+                        <span class="report-checkpoint__icon" aria-hidden="true">!</span>
+                        상권 진입 Check Point
                     </h3>
-                    <div id="risk-warnings-box" style="font-size: 14px; line-height: 1.8; color: #7f1d1d; font-weight: 600;"></div>
+                    <div id="risk-warnings-box"></div>
                 </div>
 
-                <div class="report-section no-print" id="report-stage2-section" style="display: none; border: 2px solid #fdba74; border-radius: 14px; background: linear-gradient(135deg, #fffbeb 0%, #ffedd5 100%); padding: 20px;">
-                    <h3 style="font-size: 16px; font-weight: 900; margin-bottom: 8px; color: #9a3412; border-left: 4px solid #ea580c; padding-left: 10px;">🏗️ 2단계 · 미시 입지(후보 좌표) 분석</h3>
-                    <p style="font-size: 13px; color: #7c2d12; line-height: 1.65; font-weight: 600; margin: 0 0 14px 0;">
+                <div class="report-section no-print report-stage2-card" id="report-stage2-section" style="display: none;">
+                    <h3 class="report-stage2-card__title">2단계 · 미시 입지 (후보 좌표)</h3>
+                    <p class="report-stage2-card__lead">
                         1단계 Top 5 권역을 바탕으로 권역 내 후보 지점을 점수화해 <strong>3~5곳</strong>을 뽑고, 지도에 표시합니다. (추가 1회권 · 경쟁기관이 인근·동일 건물이어도 점수에 반영만 됩니다.)
                     </p>
-                    <div id="report-stage2-done" style="display: none; font-size: 13px; font-weight: 700; color: #047857; margin-bottom: 10px;">✓ 2단계 분석이 완료되었습니다. 지도의 주황 핀과 아래 결과 패널에서 후보를 확인하세요.</div>
+                    <div id="report-stage2-done" class="report-stage2-card__done" style="display: none;">2단계 분석이 완료되었습니다. 지도의 후보 핀과 결과 패널에서 확인하세요.</div>
                     <button type="button" id="report-stage2-cta-btn" class="report-stage2-cta-btn" onclick="triggerStage2PaymentFlowFromReport()">2단계 분석하기</button>
                 </div>
 

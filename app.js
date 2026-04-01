@@ -1086,7 +1086,7 @@ function renderStage2FullReport(payload) {
     head.innerHTML = `
         <div class="stage2-title">2단계 · 후보 비교 (Top ${top.length})</div>
         <p class="stage2-note">${meta}</p>
-        <p class="stage2-note" style="margin-top:8px;color:#fef3c7;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행을 누르면 상세 리포트가 열리고, 지도 말풍선과 연동됩니다.</p>
+        <p class="stage2-note stage2-note--emphasis" style="margin-top:8px;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행을 누르면 상세 리포트가 열리고, 지도 말풍선과 연동됩니다.</p>
         <p class="stage2-note" style="margin-top:6px;">${escHtml2(payload.disclaimer || '')}</p>`;
     compareHost.innerHTML = buildStage2CompareTableHtml(top, payload, { light: false, omitCaption: true });
     cardBox.innerHTML = '';
@@ -1148,7 +1148,7 @@ async function runStage2BuildingPickActual() {
     const toolbar = document.getElementById('stage2-toolbar');
     if (sec && head) {
         sec.style.display = 'block';
-        head.innerHTML = '<p class="stage2-note" style="color:#fef3c7;margin:0;">2단계 분석 중… (최대 1~2분) · 지도에 곧 후보 핀이 표시됩니다.</p>';
+        head.innerHTML = '<p class="stage2-note stage2-note--emphasis" style="margin:0;">2단계 분석 중… (최대 1~2분) · 지도에 곧 후보 핀이 표시됩니다.</p>';
         if (cardBox) cardBox.innerHTML = '';
         if (compareHost) compareHost.innerHTML = '';
         if (toolbar) toolbar.style.display = 'none';
@@ -1544,15 +1544,22 @@ function renderMapAndResults(data, searchRadius) {
         let spending = Math.floor(Math.random() * 3 + 4) * 10000; 
         let spendingText = `건당 약 ${(spending / 10000).toFixed(1)}만원`;
 
+        const scoreStr = String(rec.score || '');
+        const scoreSplit = scoreStr.split('/');
+        const scoreNum = scoreSplit[0] || '—';
+        const scoreDenom = scoreSplit.length > 1 ? '/' + scoreSplit.slice(1).join('/') : '/10';
         cardsHtml += `
         <div class="result-card result-card--compact" style="border-top: 4px solid ${rec.color};" onclick="panMapToNode(${rec.lat}, ${rec.lng})">
             <div class="rc-top">
                 <div class="rc-rank" style="background:${rec.color};">${rec.rank}</div>
-                <div class="rc-title" style="font-size:16px;">${rec.name}</div>
+                <div class="rc-title" style="font-size:15px;">${rec.name}</div>
             </div>
-            <div class="rc-info-row">
-                <span class="rc-label">AI 추천 점수</span>
-                <span class="rc-value" style="color:${rec.color}; font-size:18px;">${rec.score}</span>
+            <div class="rc-meta-badge" title="권역 요약"><span aria-hidden="true">◆</span> ${rec.comp_text || '경쟁 요약'}</div>
+            <div class="rc-score-hero">
+                <div>
+                    <div class="rc-score-hero__label">종합 점수</div>
+                    <span class="rc-score-hero__value" style="color:${rec.color};">${scoreNum}<span class="rc-score-hero__suffix">${scoreDenom}</span></span>
+                </div>
             </div>
             <div class="rc-info-row">
                 <span class="rc-label">경쟁 강도</span>
@@ -1565,16 +1572,17 @@ function renderMapAndResults(data, searchRadius) {
 
             <div class="rc-premium-box">
                 <div class="premium-item">
-                    <span class="premium-label">🏢 예상 상가 임대료 (1층)</span>
+                    <span class="premium-label">예상 1층 임대료</span>
                     <span class="premium-value">${rentText}</span>
                 </div>
                 <div class="premium-item">
-                    <span class="premium-label">💳 타겟 월평균 의료소비액</span>
+                    <span class="premium-label">타겟 월평균 의료소비</span>
                     <span class="premium-value">${spendingText}</span>
                 </div>
             </div>
 
-            <button class="rc-btn" onclick="openReportModal(${index}); event.stopPropagation();">정밀 컨설팅 리포트 (수식공개)</button>
+            <button class="rc-btn" onclick="openReportModal(${index}); event.stopPropagation();">정밀 분석 리포트</button>
+            <span class="rc-link-foot">상세 정보보기 · 4~5단계 지표·수식 포함</span>
         </div>`;
     });
     
@@ -2105,12 +2113,12 @@ function openReportModal(index) {
     const anc = parseScore(f.anchor_score);
 
     const formulaHtml = `
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>기본 상권 베이스 점수 (하한선 보장)</span><span style="color:#10B981; font-weight:800;">+ 20.0 ~ 30.0점</span></div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>타겟 연령 최적화 가점 ${age.desc}</span><span style="color:#10B981; font-weight:800;">${age.val}점</span></div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>결제 소비력 및 배후 인구 가점 ${rev.desc}</span><span style="color:#10B981; font-weight:800;">${rev.val}점</span></div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>교통/유동인구 앵커 가점 ${anc.desc}</span><span style="color:#10B981; font-weight:800;">${anc.val}점</span></div>
-        <div style="display:flex; justify-content:space-between; border-top:1px dashed #E5E7EB; padding-top:10px; margin-bottom:8px;"><span>상권 공실/폐업 기본 리스크 감점</span><span style="color:#EF4444; font-weight:800;">- ${f.risk_penalty || '20.0'}점</span></div>
-        <div style="display:flex; justify-content:space-between;"><span>동일 과목 레드오션 밀집도 감점</span><span style="color:#EF4444; font-weight:800;">${f.comp_penalty}점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">기본 상권 베이스 점수 (하한선 보장)</span><span class="algo-row__val">+ 20.0 ~ 30.0점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">타겟 연령 최적화 가점 ${age.desc}</span><span class="algo-row__val">${age.val}점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">결제 소비력 및 배후 인구 가점 ${rev.desc}</span><span class="algo-row__val">${rev.val}점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">교통·유동인구 앵커 가점 ${anc.desc}</span><span class="algo-row__val">${anc.val}점</span></div>
+        <div class="algo-row algo-row--minus algo-row--divider-top"><span class="algo-row__label">상권 공실·폐업 리스크 감점</span><span class="algo-row__val">- ${f.risk_penalty || '20.0'}점</span></div>
+        <div class="algo-row algo-row--minus"><span class="algo-row__label">동일 과목 레드오션 밀집도 감점</span><span class="algo-row__val">${f.comp_penalty}점</span></div>
     `;
     
     document.getElementById('report-formula-breakdown').innerHTML = formulaHtml;
@@ -2164,12 +2172,12 @@ window.renderReportFromData = function(data) {
     const f = rec.formula || {};
     const parseScore = (str) => { if (!str) return { val: '+0.0', desc: '' }; const p = String(str).split(' '); return { val: p[0], desc: p[1] || '' }; };
     const formulaHtml = `
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>기본 상권 베이스 점수</span><span style="color:#10B981; font-weight:800;">+ 20.0 ~ 30.0점</span></div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>타겟 연령 최적화 ${parseScore(f.age_score).desc}</span><span style="color:#10B981; font-weight:800;">${parseScore(f.age_score).val}점</span></div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>결제 소비력 및 배후 인구 ${parseScore(f.revenue_score).desc}</span><span style="color:#10B981; font-weight:800;">${parseScore(f.revenue_score).val}점</span></div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:8px;"><span>교통/유동인구 앵커 ${parseScore(f.anchor_score).desc}</span><span style="color:#10B981; font-weight:800;">${parseScore(f.anchor_score).val}점</span></div>
-        <div style="display:flex; justify-content:space-between; border-top:1px dashed #E5E7EB; padding-top:10px;"><span>리스크 감점</span><span style="color:#EF4444; font-weight:800;">- ${f.risk_penalty || '20.0'}점</span></div>
-        <div style="display:flex; justify-content:space-between;"><span>경쟁 밀집도 감점</span><span style="color:#EF4444; font-weight:800;">${f.comp_penalty || '0'}점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">기본 상권 베이스 점수</span><span class="algo-row__val">+ 20.0 ~ 30.0점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">타겟 연령 최적화 ${parseScore(f.age_score).desc}</span><span class="algo-row__val">${parseScore(f.age_score).val}점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">결제 소비력·배후 인구 ${parseScore(f.revenue_score).desc}</span><span class="algo-row__val">${parseScore(f.revenue_score).val}점</span></div>
+        <div class="algo-row algo-row--plus"><span class="algo-row__label">교통·유동 앵커 ${parseScore(f.anchor_score).desc}</span><span class="algo-row__val">${parseScore(f.anchor_score).val}점</span></div>
+        <div class="algo-row algo-row--minus algo-row--divider-top"><span class="algo-row__label">리스크 감점</span><span class="algo-row__val">- ${f.risk_penalty || '20.0'}점</span></div>
+        <div class="algo-row algo-row--minus"><span class="algo-row__label">경쟁 밀집도 감점</span><span class="algo-row__val">${f.comp_penalty || '0'}점</span></div>
     `;
     document.getElementById('report-formula-breakdown').innerHTML = formulaHtml;
     const finalScoreEl = document.getElementById('report-final-score');
@@ -2223,12 +2231,12 @@ function renderRadarAndBep(nodeData) {
                     label: '상권 밸런스',
                     data: radar.values,
                     fill: true,
-                    backgroundColor: 'rgba(99, 102, 241, 0.22)',
-                    borderColor: 'rgba(79, 70, 229, 0.95)',
-                    pointBackgroundColor: 'rgba(79, 70, 229, 1)',
+                    backgroundColor: 'rgba(0, 64, 133, 0.2)',
+                    borderColor: 'rgba(0, 64, 133, 0.92)',
+                    pointBackgroundColor: 'rgba(0, 64, 133, 1)',
                     pointBorderColor: '#fff',
                     pointHoverBackgroundColor: '#fff',
-                    pointHoverBorderColor: 'rgba(79, 70, 229, 1)',
+                    pointHoverBorderColor: 'rgba(0, 64, 133, 1)',
                     borderWidth: 2
                 }]
             },
@@ -2239,10 +2247,14 @@ function renderRadarAndBep(nodeData) {
                     r: {
                         min: 0,
                         max: 10,
-                        ticks: { stepSize: 2, font: { size: 10, family: 'Pretendard' } },
-                        grid: { color: 'rgba(148, 163, 184, 0.35)' },
-                        angleLines: { color: 'rgba(148, 163, 184, 0.35)' },
-                        pointLabels: { font: { size: 11, weight: '700', family: 'Pretendard' }, color: '#475569' }
+                        ticks: { stepSize: 2, font: { size: 10, family: 'Pretendard' }, color: '#64748b', backdropColor: 'transparent' },
+                        grid: { color: 'rgba(100, 116, 139, 0.22)' },
+                        angleLines: { color: 'rgba(100, 116, 139, 0.2)' },
+                        pointLabels: {
+                            font: { size: 11, weight: '700', family: 'Pretendard' },
+                            color: '#334155',
+                            padding: 6
+                        }
                     }
                 },
                 plugins: {
@@ -2266,8 +2278,8 @@ function renderRadarAndBep(nodeData) {
                 <tr><td style="color:#64748b; padding:4px 0;">월 임대료 추정</td><td style="text-align:right; font-weight:800;">${fmt(bep.monthly_rent_krw)}원</td></tr>
                 <tr><td style="color:#64748b; padding:4px 0;">월 고정비 합계</td><td style="text-align:right; font-weight:800;">${fmt(bep.monthly_fixed_total_krw)}원</td></tr>
                 <tr><td style="color:#64748b; padding:4px 0;">추정 객단가(회당)</td><td style="text-align:right; font-weight:800;">${fmt(bep.estimated_ticket_krw)}원</td></tr>
-                <tr style="border-top:1px dashed #cbd5e1;"><td style="color:#0f172a; padding:8px 0 4px; font-weight:800;">BEP 월간 환자</td><td style="text-align:right; font-weight:900; color:#4f46e5; padding:8px 0 4px;">${fmt(bep.breakeven_monthly_patients)}명</td></tr>
-                <tr><td style="color:#0f172a; padding:4px 0; font-weight:800;">BEP 일평균(영업일)</td><td style="text-align:right; font-weight:900; color:#4f46e5;">${bep.breakeven_daily_patients != null ? bep.breakeven_daily_patients : '-'}명</td></tr>
+                <tr style="border-top:1px dashed #cbd5e1;"><td style="color:#0f172a; padding:8px 0 4px; font-weight:800;">BEP 월간 환자</td><td style="text-align:right; font-weight:900; color:#004085; padding:8px 0 4px;">${fmt(bep.breakeven_monthly_patients)}명</td></tr>
+                <tr><td style="color:#0f172a; padding:4px 0; font-weight:800;">BEP 일평균(영업일)</td><td style="text-align:right; font-weight:900; color:#004085;">${bep.breakeven_daily_patients != null ? bep.breakeven_daily_patients : '-'}명</td></tr>
             </table>
             <p style="font-size:10px; color:#94a3b8; margin-top:12px;">※ 임대·인건비·객단가는 V7 추정치이며, V8에서 KOSIS·실거래·인건비 테이블로 정밀화됩니다.</p>
         `;
@@ -2361,9 +2373,9 @@ function renderRiskWarnings(nodeData) {
     if (!box) return;
     const warnings = nodeData.risk_warnings;
     if (warnings && Array.isArray(warnings) && warnings.length > 0) {
-        box.innerHTML = '<ul style="margin:0; padding-left:20px;">' + warnings.map(w => `<li style="margin-bottom:8px;">${w}</li>`).join('') + '</ul>';
+        box.innerHTML = '<ul class="report-checkpoint-list">' + warnings.map(w => `<li>${w}</li>`).join('') + '</ul>';
     } else {
-        box.innerHTML = '<p style="margin:0; color:#94a3b8;">해당 상권에 대한 특별 경고 사항이 없습니다. 현장 실사는 여전히 권장됩니다.</p>';
+        box.innerHTML = '<p class="report-checkpoint-empty">해당 상권에 대한 특별 경고가 없습니다. 개원 전 현장 실사는 권장합니다.</p>';
     }
 }
 
@@ -2385,7 +2397,7 @@ function renderCharts(nodeData) {
             labels: ['2030 청년층', '4050 중장년층', '60대 이상 고령층'],
             datasets: [{
                 data: [youngRatio, middleRatio, oldRatio],
-                backgroundColor: ['#3b82f6', '#10b981', '#f59e0b'],
+                backgroundColor: ['#004085', '#2EC4B6', '#E07A5F'],
                 borderWidth: 0,
                 hoverOffset: 4
             }]
@@ -2433,7 +2445,7 @@ function renderCharts(nodeData) {
             datasets: [{
                 label: '월 추정 최고매출 (만원)',
                 data: revData,
-                backgroundColor: '#8b5cf6',
+                backgroundColor: 'rgba(0, 64, 133, 0.85)',
                 borderRadius: 4,
                 barPercentage: 0.6
             }]
