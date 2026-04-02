@@ -11,7 +11,7 @@
     
     <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
     
-    <link rel="stylesheet" href="style.css?v=naver-land-ui-2">
+    <link rel="stylesheet" href="style.css?v=naver-land-ui-3">
     <!-- 임시: 로그인 UI 숨김(분석 비로그인 우선). 복구 시 이 style 블록만 삭제하세요. -->
     <style id="bluedot-login-paused">
         #header-login-btn, #header-user-chip { display: none !important; }
@@ -335,7 +335,7 @@
                         <div id="stage2-report-head" class="stage2-report-head"></div>
                         <div id="stage2-toolbar" class="stage2-toolbar no-print" style="display: none;">
                             <button type="button" class="stage2-fs-btn" onclick="openStage2FullscreenCompare()">전체 화면 비교</button>
-                            <button type="button" class="stage2-toolbar-naver" onclick="window.openNaverLandAtMapFocus()" title="2단계 1위 좌표 기준(없으면 지도 중심)">네이버 부동산 매물</button>
+                            <button type="button" class="stage2-toolbar-naver" onclick="window.openNaverLandAtMapFocus()" title="2단계 1위 좌표·줌 기준 월세 상가 목록(없으면 지도 중심)">월세 상가 (네이버)</button>
                         </div>
                         <div class="stage2-compare-scroll">
                             <div id="stage2-compare-table-host"></div>
@@ -367,7 +367,7 @@
         <div class="map-controls">
             <button class="ctrl-btn" onclick="zoomIn()" title="확대">+</button>
             <button class="ctrl-btn" onclick="zoomOut()" title="축소">-</button>
-            <button type="button" class="ctrl-btn ctrl-btn-naver-land" onclick="window.openNaverLandAtMapFocus()" title="네이버 부동산 상가·상가주택·사무실 매물. 2단계 분석 후에는 종합 1위 좌표, 없으면 지도 중심">N</button>
+            <button type="button" class="ctrl-btn ctrl-btn-naver-land" onclick="window.openNaverLandAtMapFocus()" title="월세 상가·상가주택·사무실 목록. 2단계 후 1위 좌표·줌, 없으면 지도 중심·줌">N</button>
             <button type="button" class="ctrl-btn micro-pick-btn" id="micro-site-toggle-btn" onclick="toggleMicroSitePickMode()" title="미시 입지: 지도를 탭해 분석 (📍)">📍</button>
             <button class="ctrl-btn my-loc-btn" onclick="executeGPSLocation()" title="내 위치">
                 <svg viewBox="0 0 24 24"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>
@@ -691,7 +691,7 @@
     </div>
 
     <script src="auth.js"></script>
-    <script src="app.js?v=naver-land-ui-2"></script>
+    <script src="app.js?v=naver-land-ui-3"></script>
     <script>
         // =========================================================
         // 🚀 1. GPS 기반 내 위치 자동 설정 및 주소 변환 로직

@@ -8,8 +8,8 @@ const BASE_URL = "https://new.land.naver.com/articles";
 /** 개원·상가 입지 분석용 기본 매물 유형 */
 export const NAVER_LAND_RETAIL_PROPERTY_TYPES = "SG:SGJT:SM" as const;
 
-/** 매매·전세·월세 */
-export const NAVER_LAND_TRADE_TYPES = "A1:B1:B2" as const;
+/** 월세만 (개원 상가 임차 검색용). 매매·전세 포함 시 A1:B1:B2 */
+export const NAVER_LAND_TRADE_TYPES = "B2" as const;
 
 export const NAVER_LAND_RETAIL_FILTER = "RETAIL" as const;
 

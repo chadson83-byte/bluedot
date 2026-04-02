@@ -782,7 +782,7 @@ function formatStage2Metric(v) {
     return String(v);
 }
 
-/** 네이버 부동산 매물(상가·상가주택·사무실) — 2단계 후보 좌표 연동 */
+/** 네이버 부동산: 상가·상가주택·사무실 + 월세(B2) + 실매물(RETAIL). ms=지도중심·줌으로 해당 구역 목록 */
 const BLUEDOT_NAVER_LAND_ARTICLES_BASE = 'https://new.land.naver.com/articles';
 const BLUEDOT_NAVER_LAND_ZOOM = 16;
 
@@ -795,7 +795,7 @@ function buildNaverLandArticlesUrl(lat, lng, zoom) {
     if (!Number.isFinite(z) || z < 1 || z > 22) return null;
     const ms = `${la},${ln},${z}`;
     const a = 'SG:SGJT:SM';
-    const b = 'A1:B1:B2';
+    const b = 'B2';
     const e = 'RETAIL';
     const q = [
         `ms=${encodeURIComponent(ms)}`,
@@ -957,10 +957,10 @@ window.openStage2CandidateDetail = function (idx) {
         : '';
 
     const naverUrl = buildNaverLandArticlesUrl(c.lat, c.lng, BLUEDOT_NAVER_LAND_ZOOM);
-    const naverTitle = `네이버 부동산 매물(상가·상가주택·사무실) — ${lines.sub}`;
+    const naverTitle = `네이버 부동산 월세 상가·상가주택·사무실(이 좌표·줌 기준) — ${lines.sub}`;
     const naverBtn = naverUrl
-        ? `<button type="button" class="btn-naver-land" title="${escHtml2(naverTitle)}" onclick="window.openNaverLandFromDetailIdx()">네이버 부동산에서 매물 보기</button>`
-        : `<button type="button" class="btn-naver-land" disabled title="좌표가 없어 매물 검색을 열 수 없습니다.">네이버 부동산 (좌표 없음)</button>`;
+        ? `<button type="button" class="btn-naver-land" title="${escHtml2(naverTitle)}" onclick="window.openNaverLandFromDetailIdx()">월세 상가 매물 보기 (네이버)</button>`
+        : `<button type="button" class="btn-naver-land" disabled title="좌표가 없어 매물 검색을 열 수 없습니다.">월세 상가 (좌표 없음)</button>`;
 
     body.innerHTML = `
         <div class="stage2-detail-score-pill" style="background:${gcol}18;border:2px solid ${gcol};color:${gcol};">
@@ -1044,7 +1044,7 @@ function drawStage2Markers(top) {
                     <strong>${safeMain}</strong>
                     <span>${safeSub}</span>
                 </div>
-                <button type="button" class="stage2-pin-naver-btn" onclick="event.stopPropagation();window.openNaverLandForStage2Candidate(${i});" title="네이버 부동산 이 좌표 매물">네이버 매물</button>
+                <button type="button" class="stage2-pin-naver-btn" onclick="event.stopPropagation();window.openNaverLandForStage2Candidate(${i});" title="이 좌표·줌 기준 월세 상가·사무실 목록">월세 상가</button>
             </div>
             <div class="stage2-pin-arrow" style="border-top-color:${gcol}"></div>
         </div>`;
@@ -1099,7 +1099,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
             <td class="s2c-actions" onclick="event.stopPropagation();">
                 <button type="button" class="s2c-btn" onclick="window.openStage2CandidateDetail(${i})">상세</button>
                 <button type="button" class="s2c-btn s2c-btn-map" onclick="window.panToStage2Candidate(${i})">지도</button>
-                <button type="button" class="s2c-btn s2c-btn-naver" title="네이버 부동산 상가·사무실 매물" onclick="window.openNaverLandForStage2Candidate(${i})">부동산</button>
+                <button type="button" class="s2c-btn s2c-btn-naver" title="월세 상가·상가주택·사무실(네이버)" onclick="window.openNaverLandForStage2Candidate(${i})">월세</button>
             </td>
         </tr>`;
     }).join('');
@@ -1124,7 +1124,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
             </thead>
             <tbody>${rows}</tbody>
         </table>
-        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>상세 리포트</b>가 열립니다. <b>부동산</b>은 네이버 부동산(상가·사무실)로 새 탭입니다. 지도 오른쪽 <b>N</b>은 1위 좌표(또는 지도 중심) 기준입니다.</p>'}
+        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>상세 리포트</b>가 열립니다. <b>월세</b>는 해당 좌표·줌 기준 <b>월세 상가·사무실</b> 목록(네이버) 새 탭입니다. 지도 오른쪽 <b>N</b>은 1위 좌표(또는 지도 중심) 기준입니다.</p>'}
     </div>`;
 }
 
