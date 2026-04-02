@@ -390,6 +390,15 @@ let stage2MapObjects = [];
 let stage2Data = null;
 let stage2RoadviewWidget = null;
 
+/** DB 등록 상가 매물 레이어 (건물 footprint + 의사 3D 카드 + 경쟁 POI) */
+let retailListingsLayerOn = true;
+let retailListingPolygons = [];
+let retailListingOverlays = [];
+let retailListingsFetchTimer = null;
+const RETAIL_LISTINGS_IDLE_MS = 900;
+const RETAIL_LISTINGS_RADIUS_M = 720;
+let retailListingsById = {};
+
 /** 결제 모달 완료 후 실행할 동작: macro=1단계 분석, stage2=2단계 API */
 let pendingAfterPaymentAction = null;
 /** 2단계: 정밀 리포트에서 연 1단계 권역 1곳만 보내기 위한 스냅샷 (결제 대기 중에도 유지) */
@@ -482,7 +491,9 @@ function initMap() {
         map = new kakao.maps.Map(mapContainer, { center: defaultLatLng, level: 6 });
 
         kakao.maps.event.addListener(map, 'idle', scheduleCenterRegionUpdate);
+        kakao.maps.event.addListener(map, 'idle', scheduleRetailListingsFetchDebounced);
         setTimeout(scheduleCenterRegionUpdate, 900);
+        setTimeout(scheduleRetailListingsFetchDebounced, 1500);
 
         kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
             if (microSitePickMode && mouseEvent && mouseEvent.latLng) {
@@ -1074,6 +1085,161 @@ function stage2GradeColor(grade) {
     if (g === 'B') return '#d97706';
     return '#64748b';
 }
+
+function clearRetailListingsOnMap() {
+    retailListingPolygons.forEach((p) => { try { p.setMap(null); } catch (_) { /* ignore */ } });
+    retailListingPolygons = [];
+    retailListingOverlays.forEach((o) => { try { o.setMap(null); } catch (_) { /* ignore */ } });
+    retailListingOverlays = [];
+}
+
+function polygonRingCentroid(ring) {
+    if (!ring || ring.length < 3) return null;
+    let n = ring.length;
+    if (Math.abs(ring[0][0] - ring[n - 1][0]) < 1e-12 && Math.abs(ring[0][1] - ring[n - 1][1]) < 1e-12) n -= 1;
+    let slat = 0;
+    let slng = 0;
+    for (let i = 0; i < n; i++) {
+        slng += ring[i][0];
+        slat += ring[i][1];
+    }
+    return { lat: slat / n, lng: slng / n };
+}
+
+function footprintToKakaoPath(footprint) {
+    if (!footprint || footprint.type !== 'Polygon' || !footprint.coordinates || !footprint.coordinates[0]) return null;
+    const outer = footprint.coordinates[0];
+    return outer.map((pair) => new kakao.maps.LatLng(pair[1], pair[0]));
+}
+
+function scheduleRetailListingsFetchDebounced() {
+    if (!retailListingsLayerOn || !map) return;
+    clearTimeout(retailListingsFetchTimer);
+    retailListingsFetchTimer = setTimeout(fetchAndDrawRetailListings, RETAIL_LISTINGS_IDLE_MS);
+}
+
+async function fetchAndDrawRetailListings() {
+    if (!retailListingsLayerOn || !map || typeof kakao === 'undefined') return;
+    const c = map.getCenter();
+    const lat = c.getLat();
+    const lng = c.getLng();
+    try {
+        const base = typeof bluedotBackendOrigin === 'function' ? bluedotBackendOrigin() : '';
+        const url = `${base}/api/retail-listings?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}&radius_m=${RETAIL_LISTINGS_RADIUS_M}&limit=80`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!data || data.status !== 'success' || !Array.isArray(data.listings)) return;
+        clearRetailListingsOnMap();
+        retailListingsById = {};
+        data.listings.forEach((L) => {
+            retailListingsById[L.id] = L;
+            drawOneRetailListing(L);
+        });
+    } catch (_) { /* ignore */ }
+}
+
+function drawOneRetailListing(L) {
+    if (!map || !L || typeof kakao === 'undefined') return;
+    const path = footprintToKakaoPath(L.footprint);
+    if (path && path.length >= 3) {
+        const poly = new kakao.maps.Polygon({
+            path,
+            strokeWeight: 2,
+            strokeColor: '#06b6d4',
+            strokeOpacity: 0.95,
+            fillColor: '#06b6d4',
+            fillOpacity: 0.12,
+        });
+        poly.setMap(map);
+        kakao.maps.event.addListener(poly, 'click', () => {
+            if (typeof window.showRetailListingPanelById === 'function') window.showRetailListingPanelById(L.id);
+        });
+        retailListingPolygons.push(poly);
+    }
+    let clat = Number(L.lat);
+    let clng = Number(L.lng);
+    if (path && path.length >= 3 && L.footprint && L.footprint.coordinates && L.footprint.coordinates[0]) {
+        const cen = polygonRingCentroid(L.footprint.coordinates[0]);
+        if (cen) {
+            clat = cen.lat;
+            clng = cen.lng;
+        }
+    }
+    const hRaw = L.building_height_m != null ? Number(L.building_height_m) : 28;
+    const h = Math.min(68, Math.max(16, (Number.isFinite(hRaw) ? hRaw * 0.85 : 28)));
+    const floorStr = L.floor != null && L.floor !== '' ? `${escHtml2(String(L.floor))}층` : '층수 미기재';
+    const ft = L.floors_total != null ? ` · 건물 ${escHtml2(String(L.floors_total))}층` : '';
+    const html = `<div class="retail-building-stack" role="button" tabindex="0" onclick="window.showRetailListingPanelById(${L.id})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.showRetailListingPanelById(${L.id});}">
+        <div class="retail-3d-prism-wrap" style="--prism-h:${h}px">
+            <div class="retail-3d-prism" aria-hidden="true"></div>
+        </div>
+        <div class="retail-3d-caption">
+            <strong>${escHtml2(L.title || '')}</strong>
+            <span>${floorStr}${ft}</span>
+        </div>
+    </div>`;
+    const pos = new kakao.maps.LatLng(clat, clng);
+    const ov = new kakao.maps.CustomOverlay({
+        position: pos,
+        content: html,
+        yAnchor: 0.88,
+        zIndex: 88,
+        xAnchor: 0.5,
+    });
+    ov.setMap(map);
+    retailListingOverlays.push(ov);
+}
+
+window.showRetailListingPanelById = function (id) {
+    const L = retailListingsById[id];
+    const modal = document.getElementById('retail-listing-modal');
+    const body = document.getElementById('retail-listing-modal-body');
+    if (!L || !modal || !body) return;
+    const comps = Array.isArray(L.competing_pois) ? L.competing_pois : [];
+    let compHtml = '';
+    comps.forEach((p) => {
+        const nm = escHtml2(String(p.name || ''));
+        const dm = p.distance_m != null ? `${escHtml2(String(p.distance_m))}m` : '';
+        const k = escHtml2(String(p.kind || ''));
+        compHtml += `<li><span class="retail-d-comp-name">${nm}</span>${dm ? `<span class="retail-d-comp-m">${dm}</span>` : ''}${k ? `<span class="retail-d-comp-k">${k}</span>` : ''}</li>`;
+    });
+    if (!compHtml) {
+        compHtml = '<li class="retail-d-muted">DB <code>competing_pois</code> JSON 배열에 name, distance_m, kind 등을 넣으면 표시됩니다.</li>';
+    }
+    const hRaw = L.building_height_m != null ? Number(L.building_height_m) : 40;
+    const vh = Math.min(120, Math.max(40, (Number.isFinite(hRaw) ? hRaw * 1.4 : 56)));
+    const floorLine = L.floor != null ? `${L.floor}층` : '층수 미기재';
+    const ftLine = L.floors_total != null ? ` · 건물 전체 ${L.floors_total}층` : '';
+    body.innerHTML = `
+        <div class="retail-d-head">
+            <div class="retail-d-3d" style="--big-h:${vh}px"><div class="retail-3d-prism retail-3d-prism--large" aria-hidden="true"></div></div>
+            <div>
+                <h3 class="retail-d-title">${escHtml2(L.title || '')}</h3>
+                <p class="retail-d-loc">${escHtml2(L.address || '')}${L.address ? '<br/>' : ''}좌표 ${Number(L.lat).toFixed(5)}, ${Number(L.lng).toFixed(5)}${L.distance_from_query_m != null ? ` · 지도중심에서 약 ${escHtml2(String(L.distance_from_query_m))}m` : ''}</p>
+                <p class="retail-d-floor"><strong>${escHtml2(floorLine)}${escHtml2(ftLine)}</strong>${L.building_height_m != null ? ` · 높이 약 ${escHtml2(String(L.building_height_m))}m` : ''}</p>
+            </div>
+        </div>
+        ${L.notes ? `<p class="retail-d-notes">${escHtml2(L.notes)}</p>` : ''}
+        <div class="retail-d-section-title">경쟁·근접 시설 (DB)</div>
+        <ul class="retail-d-comp-list">${compHtml}</ul>
+        <p class="retail-d-hint">지도 폴리곤은 <code>footprint</code> GeoJSON입니다. LOD 건물 3D는 Cesium/Mapbox extrusion 등 별도 SDK가 필요합니다.</p>
+    `;
+    modal.style.display = 'flex';
+};
+
+window.closeRetailListingModal = function () {
+    const modal = document.getElementById('retail-listing-modal');
+    if (modal) modal.style.display = 'none';
+};
+
+window.toggleRetailListingsLayer = function () {
+    retailListingsLayerOn = !retailListingsLayerOn;
+    const btn = document.getElementById('retail-listings-toggle-btn');
+    if (btn) btn.classList.toggle('retail-layer-off', !retailListingsLayerOn);
+    if (!retailListingsLayerOn) clearRetailListingsOnMap();
+    else scheduleRetailListingsFetchDebounced();
+};
 
 /** 후보 간 비교 표 (패널·전체화면 공통). light: 흰 배경 모달용 */
 function buildStage2CompareTableHtml(top, payload, options) {

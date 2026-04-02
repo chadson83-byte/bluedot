@@ -1,0 +1,43 @@
+{
+  "listings": [
+    {
+      "external_ref": "demo-haeundae-001",
+      "title": "해운대 대로변 상가 (데모)",
+      "address": "부산광역시 해운대구 (샘플)",
+      "lat": 35.1631,
+      "lng": 129.1636,
+      "floor": 2,
+      "floors_total": 12,
+      "building_height_m": 42,
+      "footprint": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [129.16345, 35.16295],
+            [129.16375, 35.16295],
+            [129.16375, 35.16325],
+            [129.16345, 35.16325],
+            [129.16345, 35.16295]
+          ]
+        ]
+      },
+      "competing_pois": [
+        {
+          "name": "○○내과의원",
+          "lat": 35.16335,
+          "lng": 129.1641,
+          "distance_m": 120,
+          "kind": "동일 추정 과목"
+        },
+        {
+          "name": "△△약국",
+          "lat": 35.1629,
+          "lng": 129.1632,
+          "distance_m": 45,
+          "kind": "약국"
+        }
+      ],
+      "notes": "데모용 — 실제 매물 아님. footprint 는 GeoJSON Polygon, 좌표 순서 [경도,위도]."
+    }
+  ]
+}

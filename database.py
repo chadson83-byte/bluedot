@@ -3,8 +3,10 @@
 import sqlite3
 import os
 import json
+import math
 from datetime import datetime
 from contextlib import contextmanager
+from typing import Any, Dict, List
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(_BASE, "bluedot.db")
@@ -60,6 +62,30 @@ def init_db():
             );
             CREATE INDEX IF NOT EXISTS idx_reports_user ON analysis_reports(user_id);
             CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
+
+            CREATE TABLE IF NOT EXISTS retail_listings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                external_ref TEXT,
+                title TEXT NOT NULL,
+                address TEXT,
+                lat REAL NOT NULL,
+                lng REAL NOT NULL,
+                floor INTEGER,
+                floors_total INTEGER,
+                footprint_geojson TEXT,
+                building_height_m REAL,
+                competing_pois_json TEXT,
+                notes TEXT,
+                meta_json TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_retail_listings_external_ref
+                ON retail_listings(external_ref)
+                WHERE external_ref IS NOT NULL AND length(trim(external_ref)) > 0;
+            CREATE INDEX IF NOT EXISTS idx_retail_listings_lat_lng ON retail_listings(lat, lng);
+            CREATE INDEX IF NOT EXISTS idx_retail_listings_active ON retail_listings(is_active);
         """)
 
 
@@ -178,3 +204,175 @@ def add_user_credits(user_id: int, amount: int):
     """결제 외 크레딧 추가 (테스트 등)"""
     with get_db() as conn:
         add_credits_raw(conn, user_id, amount)
+
+
+def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371000.0
+    p = math.pi / 180.0
+    a = 0.5 - math.cos((lat2 - lat1) * p) / 2.0
+    a += math.cos(lat1 * p) * math.cos(lat2 * p) * (1.0 - math.cos((lng2 - lng1) * p)) / 2.0
+    return r * 2.0 * math.asin(math.sqrt(min(1.0, max(0.0, a))))
+
+
+def list_retail_listings_nearby(lat: float, lng: float, radius_m: float, limit: int = 200) -> List[Dict[str, Any]]:
+    """활성 매물만 반경 필터 (대략 bbox 후 정밀 거리)."""
+    radius_m = float(max(10.0, min(radius_m, 5000.0)))
+    limit = int(max(1, min(limit, 500)))
+    dlat = radius_m / 110574.0
+    dlng = radius_m / max(1e-6, 111320.0 * math.cos(math.radians(lat)))
+    lat0, lat1 = lat - dlat, lat + dlat
+    lng0, lng1 = lng - dlng, lng + dlng
+    with get_db() as conn:
+        cur = conn.execute(
+            """
+            SELECT * FROM retail_listings
+            WHERE is_active = 1 AND lat BETWEEN ? AND ? AND lng BETWEEN ? AND ?
+            LIMIT ?
+            """,
+            (lat0, lat1, lng0, lng1, limit * 3),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        d = _haversine_m(lat, lng, float(r["lat"]), float(r["lng"]))
+        if d <= radius_m:
+            rr = dict(r)
+            rr["distance_from_query_m"] = round(d, 1)
+            out.append(rr)
+    out.sort(key=lambda x: x["distance_from_query_m"])
+    return out[:limit]
+
+
+def _serialize_listing_row(r: Dict[str, Any]) -> Dict[str, Any]:
+    o: Dict[str, Any] = {
+        "id": r["id"],
+        "external_ref": r.get("external_ref"),
+        "title": r["title"],
+        "address": r.get("address"),
+        "lat": float(r["lat"]),
+        "lng": float(r["lng"]),
+        "floor": r.get("floor"),
+        "floors_total": r.get("floors_total"),
+        "building_height_m": r.get("building_height_m"),
+        "notes": r.get("notes"),
+        "is_active": bool(r.get("is_active", 1)),
+        "distance_from_query_m": r.get("distance_from_query_m"),
+    }
+    fp = r.get("footprint_geojson")
+    if fp:
+        try:
+            o["footprint"] = json.loads(fp)
+        except (TypeError, ValueError):
+            o["footprint"] = None
+    else:
+        o["footprint"] = None
+    cj = r.get("competing_pois_json")
+    if cj:
+        try:
+            o["competing_pois"] = json.loads(cj)
+        except (TypeError, ValueError):
+            o["competing_pois"] = []
+    else:
+        o["competing_pois"] = []
+    mj = r.get("meta_json")
+    if mj:
+        try:
+            o["meta"] = json.loads(mj)
+        except (TypeError, ValueError):
+            o["meta"] = {}
+    else:
+        o["meta"] = {}
+    return o
+
+
+def list_retail_listings_nearby_api(lat: float, lng: float, radius_m: float, limit: int = 200) -> List[Dict[str, Any]]:
+    raw = list_retail_listings_nearby(lat, lng, radius_m, limit=limit)
+    return [_serialize_listing_row(r) for r in raw]
+
+
+def upsert_retail_listing(data: Dict[str, Any]) -> int:
+    """external_ref 가 있으면 동일 키 행을 갱신, 없으면 삽입."""
+    title = (data.get("title") or "").strip()
+    if not title:
+        raise ValueError("title 필수")
+    lat = float(data["lat"])
+    lng = float(data["lng"])
+    ext = (data.get("external_ref") or "").strip() or None
+    address = (data.get("address") or "").strip() or None
+    floor = data.get("floor")
+    floors_total = data.get("floors_total")
+    fp = data.get("footprint") or data.get("footprint_geojson")
+    fp_s = json.dumps(fp, ensure_ascii=False) if fp else None
+    bh = data.get("building_height_m")
+    comp = data.get("competing_pois") or []
+    comp_s = json.dumps(comp, ensure_ascii=False) if comp else None
+    notes = (data.get("notes") or "").strip() or None
+    meta = data.get("meta") or {}
+    meta_s = json.dumps(meta, ensure_ascii=False) if meta else None
+    is_act = 1 if data.get("is_active", True) else 0
+    with get_db() as conn:
+        if ext:
+            row = conn.execute("SELECT id FROM retail_listings WHERE external_ref = ?", (ext,)).fetchone()
+            if row:
+                rid = int(row["id"])
+                conn.execute(
+                    """
+                    UPDATE retail_listings SET
+                        title=?, address=?, lat=?, lng=?, floor=?, floors_total=?,
+                        footprint_geojson=?, building_height_m=?, competing_pois_json=?,
+                        notes=?, meta_json=?, is_active=?, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (
+                        title,
+                        address,
+                        lat,
+                        lng,
+                        floor,
+                        floors_total,
+                        fp_s,
+                        bh,
+                        comp_s,
+                        notes,
+                        meta_s,
+                        is_act,
+                        rid,
+                    ),
+                )
+                return rid
+        cur = conn.execute(
+            """
+            INSERT INTO retail_listings (
+                external_ref, title, address, lat, lng, floor, floors_total,
+                footprint_geojson, building_height_m, competing_pois_json, notes, meta_json, is_active
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                ext,
+                title,
+                address,
+                lat,
+                lng,
+                floor,
+                floors_total,
+                fp_s,
+                bh,
+                comp_s,
+                notes,
+                meta_s,
+                is_act,
+            ),
+        )
+        return int(cur.lastrowid)
+
+
+def delete_retail_listing(listing_id: int) -> bool:
+    with get_db() as conn:
+        cur = conn.execute("DELETE FROM retail_listings WHERE id = ?", (int(listing_id),))
+        return cur.rowcount > 0
+
+
+def count_retail_listings_active() -> int:
+    with get_db() as conn:
+        row = conn.execute("SELECT COUNT(*) AS c FROM retail_listings WHERE is_active = 1").fetchone()
+        return int(row["c"]) if row else 0

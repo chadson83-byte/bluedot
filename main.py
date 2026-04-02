@@ -90,6 +90,10 @@ def api_health():
                 "이 객체가 false/0이면 해당 단계가 서버에서 비어 있는 것입니다."
             ),
         },
+        "retail_listings": {
+            "active_count": db.count_retail_listings_active(),
+            "ingest_key_configured": bool((os.getenv("LISTINGS_INGEST_KEY") or "").strip()),
+        },
     }
 
 
@@ -109,6 +113,42 @@ def _startup_building_pipeline_warn():
 
 # DB 초기화
 db.init_db()
+
+
+def _require_listings_ingest_key(x_listings_ingest_key: Optional[str] = Header(None, alias="X-Listings-Ingest-Key")) -> bool:
+    """매물 DB 쓰기 보호. Fly 프로덕션에서는 LISTINGS_INGEST_KEY 필수(로컬은 비워 두면 허용)."""
+    expected = (os.getenv("LISTINGS_INGEST_KEY") or "").strip()
+    if not expected:
+        if (os.getenv("FLY_APP_NAME") or "").strip():
+            raise HTTPException(
+                status_code=503,
+                detail="LISTINGS_INGEST_KEY 미설정 — fly secrets set LISTINGS_INGEST_KEY=... 후 X-Listings-Ingest-Key 헤더로 전달",
+            )
+        return True
+    if (x_listings_ingest_key or "").strip() != expected:
+        raise HTTPException(status_code=401, detail="X-Listings-Ingest-Key 가 올바르지 않습니다.")
+    return True
+
+
+class RetailListingCreate(BaseModel):
+    external_ref: Optional[str] = None
+    title: str
+    address: Optional[str] = None
+    lat: float
+    lng: float
+    floor: Optional[int] = None
+    floors_total: Optional[int] = None
+    footprint: Optional[Dict[str, Any]] = None
+    building_height_m: Optional[float] = None
+    competing_pois: Optional[List[Dict[str, Any]]] = None
+    notes: Optional[str] = None
+    meta: Optional[Dict[str, Any]] = None
+    is_active: bool = True
+
+
+class RetailListingsImportBody(BaseModel):
+    listings: List[RetailListingCreate]
+
 
 security = HTTPBearer(auto_error=False)
 
@@ -1978,6 +2018,50 @@ def api_micro_site_stage2(body: MicroSiteStage2Request):
         "method": "per_region_9_grid_reuse_anchors_hira",
         "disclaimer": "건물 폴리곤이 아닌 '후보 좌표' 기준 추정입니다. 현장 확인이 필요합니다.",
     }
+
+
+@app.get("/api/retail-listings")
+def api_retail_listings(lat: float, lng: float, radius_m: float = 600.0, limit: int = 120):
+    """
+    DB에 적재한 상가·임대 매물(건물 외곽선·층·경쟁 POI 메타 포함 가능).
+    지도 중심 기준 반경(m) 조회 — 프론트는 idle 시 호출.
+    """
+    radius_m = float(max(50.0, min(radius_m, 5000.0)))
+    limit = int(max(1, min(limit, 300)))
+    rows = db.list_retail_listings_nearby_api(lat, lng, radius_m, limit=limit)
+    return {"status": "success", "count": len(rows), "radius_m": radius_m, "listings": rows}
+
+
+@app.post("/api/retail-listings")
+def api_retail_listings_create(body: RetailListingCreate, _: bool = Depends(_require_listings_ingest_key)):
+    try:
+        rid = db.upsert_retail_listing(body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "success", "id": rid}
+
+
+@app.post("/api/retail-listings/import")
+def api_retail_listings_import(body: RetailListingsImportBody, _: bool = Depends(_require_listings_ingest_key)):
+    if not body.listings:
+        raise HTTPException(status_code=400, detail="listings 배열이 비어 있습니다.")
+    if len(body.listings) > 500:
+        raise HTTPException(status_code=400, detail="한 번에 최대 500건까지.")
+    ids: List[int] = []
+    errors: List[Dict[str, Any]] = []
+    for i, item in enumerate(body.listings):
+        try:
+            ids.append(db.upsert_retail_listing(item.model_dump()))
+        except Exception as ex:
+            errors.append({"index": i, "detail": str(ex)})
+    return {"status": "success", "upserted": len(ids), "ids": ids, "errors": errors}
+
+
+@app.delete("/api/retail-listings/{listing_id}")
+def api_retail_listings_delete(listing_id: int, _: bool = Depends(_require_listings_ingest_key)):
+    if not db.delete_retail_listing(int(listing_id)):
+        raise HTTPException(status_code=404, detail="매물을 찾을 수 없습니다.")
+    return {"status": "success", "deleted": int(listing_id)}
 
 
 @app.get("/api/building-aging")
