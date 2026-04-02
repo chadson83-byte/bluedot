@@ -1,9 +1,8 @@
 /**
- * 네이버 부동산(new.land.naver.com/articles) 매물 목록 URL 생성 유틸.
- * @see https://new.land.naver.com/articles
+ * 네이버 부동산 매물 지도·리스트(new.land.naver.com/houses). /articles 는 아파트 피드로 열리는 경우가 많음.
  */
 
-const BASE_URL = "https://new.land.naver.com/articles";
+const BASE_URL = "https://new.land.naver.com/houses";
 
 /** 개원·상가 입지 분석용 기본 매물 유형 */
 export const NAVER_LAND_RETAIL_PROPERTY_TYPES = "SG:SGJT:SM" as const;

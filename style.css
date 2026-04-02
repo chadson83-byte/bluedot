@@ -1305,6 +1305,111 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     font-weight: 600;
     color: #94a3b8;
 }
+
+/* 지도 우클릭 → 2단계 메뉴 */
+.stage2-rclick-menu {
+    position: fixed;
+    z-index: 8550;
+    min-width: 200px;
+    padding: 6px;
+    background: #fff;
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.22);
+    border: 1px solid #e2e8f0;
+}
+.stage2-rclick-menu-btn {
+    width: 100%;
+    padding: 10px 14px;
+    border: none;
+    border-radius: 8px;
+    background: linear-gradient(135deg, #0f172a 0%, #1e3a5f 100%);
+    color: #fff;
+    font-size: 13px;
+    font-weight: 800;
+    cursor: pointer;
+    text-align: center;
+}
+.stage2-rclick-menu-btn:hover {
+    filter: brightness(1.06);
+}
+.stage2-rclick-menu-btn:active {
+    transform: scale(0.98);
+}
+
+/* 2단계 추천 건물: 로드뷰 + 층 스캔 + 상세 */
+.stage2-exp-overlay {
+    align-items: flex-end;
+    justify-content: center;
+    padding: 0;
+    background: rgba(15, 23, 42, 0.55);
+}
+.stage2-exp-sheet {
+    width: 100%;
+    max-width: 720px;
+    max-height: min(94vh, 920px);
+    overflow: auto;
+    background: #f8fafc;
+    border-radius: 20px 20px 0 0;
+    box-shadow: 0 -8px 40px rgba(0, 0, 0, 0.18);
+}
+.stage2-exp-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 18px;
+    border-bottom: 1px solid #e2e8f0;
+    background: #fff;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+}
+.stage2-exp-title {
+    margin: 0;
+    font-size: 16px;
+    font-weight: 900;
+    color: #0f172a;
+}
+.stage2-exp-lead {
+    margin: 0;
+    padding: 12px 18px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    line-height: 1.55;
+    background: #fff;
+    border-bottom: 1px solid #e2e8f0;
+}
+.stage2-exp-rv-container {
+    width: 100%;
+    height: min(42vh, 360px);
+    min-height: 220px;
+    background: #1e293b;
+}
+.stage2-exp-body {
+    padding: 0 0 24px;
+}
+.stage2-exp-rise-block {
+    margin: 16px 18px 0;
+    padding: 18px;
+    background: #fff;
+    border-radius: 16px;
+    border: 1px solid #e2e8f0;
+    box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06);
+}
+.stage2-exp-rise-block .retail-rise-scene {
+    max-width: 100%;
+}
+.stage2-exp-detail-wrap {
+    padding: 0 18px;
+}
+.stage2-exp-detail-wrap .stage2-detail-score-pill {
+    margin-top: 16px;
+}
+.stage2-exp-detail-wrap .stage2-detail-actions {
+    margin-top: 18px;
+}
+
 .results-card-slider { 
     pointer-events: auto; /* 카드는 스와이프/클릭 되어야 함 */
     display: flex; gap: 16px; overflow-x: auto; 
@@ -2039,6 +2144,230 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     background: #f1f5f9;
     padding: 1px 4px;
     border-radius: 4px;
+}
+
+/* ---------- 건물 인사이트: 층 상승 애니메이션 + 데이터 오버레이 ---------- */
+.retail-insight-hero {
+    display: grid;
+    grid-template-columns: minmax(140px, 1fr) minmax(0, 1.2fr);
+    gap: 14px;
+    margin-bottom: 14px;
+    align-items: end;
+}
+@media (max-width: 520px) {
+    .retail-insight-hero {
+        grid-template-columns: 1fr;
+    }
+}
+.retail-rise-scene {
+    position: relative;
+    height: 210px;
+    border-radius: 16px;
+    background: linear-gradient(180deg, #020617 0%, #0f172a 38%, #1e3a5f 72%, #334155 100%);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: center;
+    padding: 10px 14px 0;
+    box-shadow:
+        inset 0 0 50px rgba(6, 182, 212, 0.14),
+        0 12px 28px rgba(15, 23, 42, 0.35);
+}
+.retail-rise-vignette {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse 80% 55% at 50% 100%, transparent 30%, rgba(2, 6, 23, 0.65) 100%);
+}
+.retail-rise-beam {
+    position: absolute;
+    left: 50%;
+    bottom: 18%;
+    width: 4px;
+    height: 55%;
+    margin-left: -2px;
+    transform-origin: bottom center;
+    background: linear-gradient(180deg, rgba(34, 211, 238, 0), rgba(34, 211, 238, 0.35) 40%, rgba(94, 234, 212, 0.5));
+    filter: blur(1px);
+    opacity: 0;
+    animation: retailRiseBeam 1.1s ease 0.15s forwards;
+    border-radius: 99px;
+}
+@keyframes retailRiseBeam {
+    from { opacity: 0; transform: scaleY(0.15); }
+    to { opacity: 1; transform: scaleY(1); }
+}
+.retail-rise-stack {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    flex-direction: column-reverse;
+    align-items: center;
+    gap: 3px;
+    width: 100%;
+    max-height: 172px;
+    overflow: hidden;
+    padding-bottom: 2px;
+}
+.retail-rise-slab {
+    height: 11px;
+    width: var(--rs-w, 52px);
+    max-width: 100%;
+    border-radius: 3px;
+    position: relative;
+    opacity: 0;
+    transform: translateY(36px) scaleX(0.82);
+    animation: retailRiseSlab 0.52s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    animation-delay: var(--rs-delay, 0s);
+}
+.retail-rise-slab-inner {
+    display: block;
+    width: 100%;
+    height: 100%;
+    border-radius: 3px;
+    background: linear-gradient(90deg, #475569 0%, #94a3b8 48%, #cbd5e1 100%);
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.22) inset,
+        2px 3px 5px rgba(0, 0, 0, 0.4);
+}
+.retail-rise-slab--listing .retail-rise-slab-inner {
+    background: linear-gradient(90deg, #0e7490 0%, #22d3ee 55%, #5eead4 100%);
+    box-shadow:
+        0 0 14px rgba(34, 211, 238, 0.55),
+        0 1px 0 rgba(255, 255, 255, 0.35) inset;
+}
+.retail-rise-pin {
+    position: absolute;
+    left: 50%;
+    top: -16px;
+    transform: translateX(-50%);
+    font-size: 9px;
+    font-style: normal;
+    font-weight: 900;
+    color: #fff;
+    background: linear-gradient(135deg, #0e7490, #0891b2);
+    padding: 3px 7px;
+    border-radius: 6px;
+    white-space: nowrap;
+    letter-spacing: -0.02em;
+    box-shadow: 0 4px 12px rgba(8, 145, 178, 0.45);
+    animation: retailPinBob 2.2s ease-in-out 0.6s infinite;
+}
+@keyframes retailPinBob {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50% { transform: translateX(-50%) translateY(-3px); }
+}
+@keyframes retailRiseSlab {
+    to {
+        opacity: 1;
+        transform: translateY(0) scaleX(1);
+    }
+}
+.retail-rise-ground {
+    position: relative;
+    z-index: 2;
+    height: 12px;
+    width: 88%;
+    margin-top: 4px;
+    background: linear-gradient(180deg, #1e293b, #0f172a);
+    border-radius: 4px 4px 0 0;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.45);
+}
+.retail-insight-hero-text {
+    padding-bottom: 4px;
+}
+.retail-insight-kicker {
+    margin: 0 0 6px;
+    font-size: 10px;
+    font-weight: 900;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #64748b;
+}
+.retail-d-title--tight {
+    margin-bottom: 4px;
+}
+.retail-rise-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 10px 0 0;
+    padding: 0;
+}
+.retail-rise-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 7px 11px;
+    border-radius: 11px;
+    background: #f1f5f9;
+    font-weight: 700;
+    color: #475569;
+    border: 1px solid #e2e8f0;
+    opacity: 0;
+    transform: translateY(10px);
+    animation: retailChipIn 0.45s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+.retail-rise-chip--floor {
+    animation-delay: 0.48s;
+}
+.retail-rise-chip--rival {
+    animation-delay: 0.58s;
+    background: #fff7ed;
+    border-color: #fed7aa;
+    color: #9a3412;
+}
+.retail-rise-chip strong {
+    color: #0f172a;
+    font-weight: 900;
+}
+.retail-rise-chip--rival strong {
+    color: #c2410c;
+}
+@keyframes retailChipIn {
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+.retail-d-loc--block {
+    margin-bottom: 10px;
+}
+.retail-d-meta-line {
+    margin: 0 0 12px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
+    line-height: 1.45;
+}
+.retail-d-comp-li-animate {
+    opacity: 0;
+    transform: translateX(-14px);
+    animation: retailCompIn 0.42s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+    animation-delay: var(--li-delay, 0s);
+}
+@keyframes retailCompIn {
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .retail-rise-slab,
+    .retail-rise-beam,
+    .retail-rise-chip,
+    .retail-d-comp-li-animate,
+    .retail-rise-pin {
+        animation: none !important;
+        opacity: 1 !important;
+        transform: none !important;
+    }
+    .retail-rise-pin {
+        transform: translateX(-50%) !important;
+    }
 }
 
 .nearest-retail-sub {

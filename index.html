@@ -11,7 +11,7 @@
     
     <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
     
-    <link rel="stylesheet" href="style.css?v=naver-land-ui-5">
+    <link rel="stylesheet" href="style.css?v=retail-rise-1">
     <!-- 임시: 로그인 UI 숨김(분석 비로그인 우선). 복구 시 이 style 블록만 삭제하세요. -->
     <style id="bluedot-login-paused">
         #header-login-btn, #header-user-chip { display: none !important; }
@@ -325,7 +325,7 @@
                         <div style="flex: 1; min-width: 0;">
                             <h2 class="results-title-main">1단계 · 상위 추천 상권 (Top 5)</h2>
                             <div class="results-title-sub">4대 공공데이터 교차 검증</div>
-                            <div class="results-title-hint">지도 핀·카드로 권역을 확인한 뒤, PC는 <strong>지도 우클릭</strong>, 모바일은 <strong>지도를 움직여 핀을 원하는 곳에 두고</strong> 화면 중앙의 <strong>2단계 분석하기</strong> 버튼으로 주변 1km·추천 2~3곳을 열 수 있습니다. 정밀 리포트에서도 2단계를 실행할 수 있습니다.</div>
+                            <div class="results-title-hint">권역 카드의 <strong>이 권역 2단계 분석</strong>으로 해당 권역만 대상으로 미시 입지 약 5곳을 받을 수 있습니다. PC는 지도 <strong>우클릭 → 2단계 분석</strong>, 모바일은 핀을 두고 <strong>2단계 분석하기</strong>로 포인터 주변 최대 5곳을 엽니다. 정밀 리포트에서도 동일 권역 2단계를 실행할 수 있습니다.</div>
                         </div>
                         <div class="results-header-actions">
                             <div class="results-close-x" onclick="closeResults()">닫기</div>
@@ -361,9 +361,12 @@
         </div>
 
         <div class="map-crosshair"></div>
-        <button type="button" id="stage2-map-center-cta" class="stage2-map-center-cta no-print" onclick="window.triggerStage2FromMapCenter && window.triggerStage2FromMapCenter()" aria-label="핀 위치 기준 2단계 미시 입지 분석">
+        <button type="button" id="stage2-map-center-cta" class="stage2-map-center-cta no-print" onclick="window.triggerStage2FromMapCenter && window.triggerStage2FromMapCenter()" aria-label="지도 중심(핀) 기준 반경 약 2.4km 후보 최대 5곳 2단계 분석" title="핀 위치 기준 · 반경 약 2.4km · 후보 최대 5곳">
             2단계 분석하기
         </button>
+        <div id="stage2-rclick-menu" class="stage2-rclick-menu no-print" style="display: none;" role="menu" aria-label="2단계 지도 메뉴">
+            <button type="button" class="stage2-rclick-menu-btn" id="stage2-rclick-menu-btn" onclick="window.confirmStage2RclickMenu && window.confirmStage2RclickMenu()">2단계 분석 (이 위치 · 최대 5곳)</button>
+        </div>
         <div id="map"></div>
         <div id="hover-loading-toast" style="display:none; position:fixed; bottom:140px; left:50%; transform:translateX(-50%); background:rgba(15,23,42,0.95); color:white; padding:10px 20px; border-radius:10px; font-size:13px; font-weight:700; z-index:200; box-shadow:0 4px 12px rgba(0,0,0,0.3); pointer-events:none;">경쟁기관 조회 중...</div>
 
@@ -706,6 +709,19 @@
             </div>
         </div>
 
+        <!-- 2단계 추천 건물: 로드뷰 → 3D 층 스캔 → 입지·매물 -->
+        <div id="stage2-experience-modal" class="modal-overlay stage2-exp-overlay" style="display: none; z-index: 8620;" role="dialog" aria-modal="true" aria-labelledby="stage2-exp-title">
+            <div class="stage2-exp-sheet">
+                <div class="stage2-exp-toolbar no-print">
+                    <h2 id="stage2-exp-title" class="stage2-exp-title">추천 입지 · 현장 확인</h2>
+                    <button type="button" class="stage2-detail-close" onclick="closeStage2ExperienceModal()" aria-label="닫기">✕</button>
+                </div>
+                <p class="stage2-exp-lead">아래에서 <strong>카카오 로드뷰</strong>로 확인한 뒤 스크롤하면 <strong>건물 스캔·입지 점수·네이버 매물</strong>이 이어집니다.</p>
+                <div id="stage2-exp-rv-container" class="stage2-exp-rv-container"></div>
+                <div id="stage2-exp-body" class="stage2-exp-body"></div>
+            </div>
+        </div>
+
         <div id="nearest-retail-modal" class="modal-overlay retail-listing-overlay" style="display: none; z-index: 8645;" role="dialog" aria-modal="true" aria-labelledby="nearest-retail-modal-title">
             <div class="retail-listing-sheet nearest-retail-sheet">
                 <div class="retail-listing-toolbar no-print">
@@ -720,7 +736,7 @@
         <div id="retail-listing-modal" class="modal-overlay retail-listing-overlay" style="display: none; z-index: 8650;" role="dialog" aria-modal="true" aria-labelledby="retail-listing-modal-title">
             <div class="retail-listing-sheet">
                 <div class="retail-listing-toolbar no-print">
-                    <h2 id="retail-listing-modal-title" class="retail-listing-modal-title">DB 등록 매물</h2>
+                    <h2 id="retail-listing-modal-title" class="retail-listing-modal-title">건물 인사이트 · DB 매물</h2>
                     <button type="button" class="stage2-detail-close" onclick="closeRetailListingModal()" aria-label="닫기">✕</button>
                 </div>
                 <div id="retail-listing-modal-body" class="retail-listing-body"></div>
@@ -730,7 +746,7 @@
     </div>
 
     <script src="auth.js"></script>
-    <script src="app.js?v=stage2-map-center-cta-1"></script>
+    <script src="app.js?v=retail-rise-1"></script>
     <script>
         // =========================================================
         // 🚀 1. GPS 기반 내 위치 자동 설정 및 주소 변환 로직

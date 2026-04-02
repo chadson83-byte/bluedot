@@ -2020,10 +2020,12 @@ def api_micro_site_stage2(body: MicroSiteStage2Request):
     pool = all_cands
     focus_note: Optional[str] = None
     pick_mode: Optional[str] = None
+    focus_radius_used_m: Optional[float] = None
     if body.focus_lat is not None and body.focus_lng is not None:
         pick_mode = "map_1km"
         fla, fln = float(body.focus_lat), float(body.focus_lng)
-        fr_m = float(max(100.0, min(float(body.focus_radius_m or 1000.0), 2500.0)))
+        fr_m = float(max(100.0, min(float(body.focus_radius_m or 1000.0), 3000.0)))
+        focus_radius_used_m = fr_m
         filtered: List[Dict[str, Any]] = []
         for c in all_cands:
             try:
@@ -2051,6 +2053,7 @@ def api_micro_site_stage2(body: MicroSiteStage2Request):
         "top_buildings": top_pick,
         "requested_top_k": top_k,
         "pick_mode": pick_mode,
+        "focus_radius_used_m": focus_radius_used_m,
         "focus_filter_note_ko": focus_note,
         "method": "per_region_9_grid_reuse_anchors_hira",
         "disclaimer": "건물 폴리곤이 아닌 '후보 좌표' 기준 추정입니다. 현장 확인이 필요합니다.",

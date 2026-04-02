@@ -408,8 +408,11 @@ let retailListingsById = {};
 let pendingAfterPaymentAction = null;
 /** 2단계: 정밀 리포트에서 연 1단계 권역 1곳만 보내기 위한 스냅샷 (결제 대기 중에도 유지) */
 let pendingStage2MacroSnapshot = null;
-/** 2단계: 지도 우클릭 지점 { lat, lng } — 해당 좌표를 그리드 중심으로 후보 산출 */
+/** 2단계: 지도 우클릭 지점 { lat, lng, map_pick_variant? } — 해당 좌표를 그리드 중심으로 후보 산출 */
 let pendingStage2MapAnchor = null;
+/** 우클릭 메뉴에서 선택 직전까지 보관하는 좌표 */
+let stage2RclickPendingLatLng = null;
+let stage2ExpRoadviewWidget = null;
 /** 1단계 권역 중 우클릭과 너무 먼 곳에서 2단계 방지 (m) */
 const BLUEDOT_STAGE2_MAP_MAX_DIST_FROM_MACRO_M = 4500;
 
@@ -460,13 +463,33 @@ function syncStage2MapCenterCta() {
     el.classList.toggle('is-visible', show);
 }
 
-/** 모바일: 지도 중심(핀) 위치로 2단계 — 우클릭 경로와 동일 */
+/** 모바일: 지도 중심(핀) 위치로 2단계 — 포인터 주변 최대 5곳 */
 window.triggerStage2FromMapCenter = function () {
     if (!map || typeof map.getCenter !== 'function') return;
     const c = map.getCenter();
     if (!c) return;
-    triggerStage2PaymentFlowFromMapRightClick(c.getLat(), c.getLng());
+    triggerStage2PaymentFlowFromMapPointer(c.getLat(), c.getLng());
 };
+
+function hideStage2RclickMenu() {
+    const m = document.getElementById('stage2-rclick-menu');
+    if (m) m.style.display = 'none';
+    stage2RclickPendingLatLng = null;
+}
+
+function showStage2RclickMenu(clientX, clientY, lat, lng) {
+    const m = document.getElementById('stage2-rclick-menu');
+    if (!m) return;
+    stage2RclickPendingLatLng = { lat: Number(lat), lng: Number(lng) };
+    m.style.display = 'block';
+    const pad = 8;
+    const mw = m.offsetWidth || 220;
+    const mh = m.offsetHeight || 48;
+    const x = Math.min(window.innerWidth - mw - pad, Math.max(pad, clientX));
+    const y = Math.min(window.innerHeight - mh - pad, Math.max(pad, clientY));
+    m.style.left = `${x}px`;
+    m.style.top = `${y}px`;
+}
 
 function getKakaoGeocoderSingleton() {
     if (!_kakaoGeocoderSingleton && typeof kakao !== 'undefined' && kakao.maps && kakao.maps.services) {
@@ -545,7 +568,19 @@ function initMap() {
             if (!mouseEvent || !mouseEvent.latLng) return;
             if (!Array.isArray(currentAnalysisData) || currentAnalysisData.length === 0) return;
             try {
-                triggerStage2PaymentFlowFromMapRightClick(mouseEvent.latLng.getLat(), mouseEvent.latLng.getLng());
+                let cx;
+                let cy;
+                if (mouseEvent.point && mapContainer) {
+                    const rect = mapContainer.getBoundingClientRect();
+                    cx = rect.left + mouseEvent.point.x;
+                    cy = rect.top + mouseEvent.point.y;
+                } else if (mouseEvent.originalEvent) {
+                    cx = mouseEvent.originalEvent.clientX;
+                    cy = mouseEvent.originalEvent.clientY;
+                } else {
+                    return;
+                }
+                showStage2RclickMenu(cx, cy, mouseEvent.latLng.getLat(), mouseEvent.latLng.getLng());
             } catch (e) {
                 console.warn('[BLUEDOT] stage2 map rightclick', e);
             }
@@ -559,6 +594,7 @@ function initMap() {
         setTimeout(scheduleSyncStage2MapCenterCta, 400);
 
         kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
+            hideStage2RclickMenu();
             if (microSitePickMode && mouseEvent && mouseEvent.latLng) {
                 const ll = mouseEvent.latLng;
                 runMicroSiteAnalysis(ll.getLat(), ll.getLng());
@@ -586,6 +622,11 @@ function displayCenterInfo(result, status) {
 }
 
 window.addEventListener('load', () => {
+    try {
+        document.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Escape') hideStage2RclickMenu();
+        }, true);
+    } catch (_) { /* ignore */ }
     try {
         window.addEventListener('resize', scheduleSyncStage2MapCenterCta, { passive: true });
     } catch (_) {
@@ -985,13 +1026,16 @@ function formatStage2Metric(v) {
     return String(v);
 }
 
-/** 네이버 부동산: 상가·상가주택·사무실 + 월세(B2) + 실매물(RETAIL). ms=지도중심·줌으로 해당 구역 목록 */
-const BLUEDOT_NAVER_LAND_ARTICLES_BASE = 'https://new.land.naver.com/articles';
+/**
+ * 네이버 부동산 매물 지도·리스트 (/houses). /articles 는 종종 아파트 피드로 열려 상가·매물이 안 맞음.
+ * ms=위도,경도,줌 · a=매물유형 · b=거래(A1매매 B1전세 B2월세) · e=RETAIL 실매물
+ */
+const BLUEDOT_NAVER_LAND_LIST_BASE = 'https://new.land.naver.com/houses';
 const BLUEDOT_NAVER_LAND_ZOOM = 16;
 /** 탭 지점 기준 목록을 동·로 구역에 가깝게 */
 const BLUEDOT_NAVER_LAND_ZOOM_LOCAL = 17;
-/** 상가만 + 월세 — 네이버 UI의 상가·월세 필터에 맞춤 */
-const NAVER_LAND_OPTS_COMMERCIAL_MONTHLY = { propertyTypes: 'SG', tradeTypes: 'B2', retailFilter: 'RETAIL' };
+/** 상가·상가주택·사무실 + 월세(B2) — a 는 단일 SG 만 쓰면 유형이 깨질 수 있어 풀 코드 사용 */
+const NAVER_LAND_OPTS_COMMERCIAL_MONTHLY = { propertyTypes: 'SG:SGJT:SM', tradeTypes: 'B2', retailFilter: 'RETAIL' };
 
 /**
  * @param {number} lat
@@ -1018,7 +1062,7 @@ function buildNaverLandArticlesUrl(lat, lng, zoom, opts) {
         `b=${encodeURIComponent(b)}`,
         `e=${encodeURIComponent(e)}`,
     ].join('&');
-    return `${BLUEDOT_NAVER_LAND_ARTICLES_BASE}?${q}`;
+    return `${BLUEDOT_NAVER_LAND_LIST_BASE}?${q}`;
 }
 
 function openNaverLandArticles(lat, lng, zoom, opts) {
@@ -1091,31 +1135,32 @@ function closeStage2RoadviewModal() {
     stage2RoadviewWidget = null;
 }
 
-function openStage2RoadviewForCandidate(lat, lng) {
-    const modal = document.getElementById('stage2-roadview-modal');
-    const container = document.getElementById('stage2-roadview-container');
-    if (!modal || !container) return;
+/** 카카오 로드뷰를 임의 컨테이너에 마운트. setWidget(rv|null) */
+function initStage2RoadviewIntoElement(containerEl, lat, lng, setWidget) {
+    if (!containerEl) return;
     if (typeof kakao === 'undefined' || !kakao.maps) {
-        alert('지도를 불러온 뒤 다시 시도해 주세요.');
+        containerEl.innerHTML = '<div class="stage2-rv-fallback"><p>지도를 불러온 뒤 다시 시도해 주세요.</p></div>';
+        if (setWidget) setWidget(null);
         return;
     }
-    container.innerHTML = '';
-    modal.style.display = 'flex';
+    containerEl.innerHTML = '';
     const run = () => {
         if (!kakao.maps.Roadview || !kakao.maps.RoadviewClient) {
-            container.innerHTML = '<div class="stage2-rv-fallback"><p>로드뷰 API를 사용할 수 없습니다.</p></div>';
+            containerEl.innerHTML = '<div class="stage2-rv-fallback"><p>로드뷰 API를 사용할 수 없습니다.</p></div>';
+            if (setWidget) setWidget(null);
             return;
         }
         const pos = new kakao.maps.LatLng(lat, lng);
-        const rv = new kakao.maps.Roadview(container);
+        const rv = new kakao.maps.Roadview(containerEl);
         const rvc = new kakao.maps.RoadviewClient();
         rvc.getNearestPanoId(pos, 120, (panoId) => {
             if (panoId === null) {
-                container.innerHTML = '<div class="stage2-rv-fallback"><p>이 위치 근처에 로드뷰 파노라마가 없습니다.</p><p class="stage2-rv-future">건물 3D 형상·실내 뷰는 추후 이 화면에 연동할 예정입니다.</p></div>';
+                containerEl.innerHTML = '<div class="stage2-rv-fallback"><p>이 위치 근처에 로드뷰 파노라마가 없습니다.</p><p class="stage2-rv-future">건물 3D 형상·실내 뷰는 추후 이 화면에 연동할 예정입니다.</p></div>';
+                if (setWidget) setWidget(null);
                 return;
             }
             rv.setPanoId(panoId, pos);
-            stage2RoadviewWidget = rv;
+            if (setWidget) setWidget(rv);
         });
     };
     if (typeof kakao.maps.load === 'function') {
@@ -1125,20 +1170,55 @@ function openStage2RoadviewForCandidate(lat, lng) {
     }
 }
 
-window.openStage2CandidateDetail = function (idx) {
-    const arr = (stage2Data && stage2Data.top_buildings) ? stage2Data.top_buildings : [];
-    const c = arr[idx];
-    if (!c) return;
-    const modal = document.getElementById('stage2-candidate-modal');
-    const body = document.getElementById('stage2-candidate-modal-body');
-    const heading = document.getElementById('stage2-detail-heading');
-    if (!modal || !body) return;
-    window.__stage2DetailIdx = idx;
+function openStage2RoadviewForCandidate(lat, lng) {
+    const modal = document.getElementById('stage2-roadview-modal');
+    const container = document.getElementById('stage2-roadview-container');
+    if (!modal || !container) return;
+    if (typeof kakao === 'undefined' || !kakao.maps) {
+        alert('지도를 불러온 뒤 다시 시도해 주세요.');
+        return;
+    }
+    modal.style.display = 'flex';
+    stage2RoadviewWidget = null;
+    initStage2RoadviewIntoElement(container, lat, lng, (w) => { stage2RoadviewWidget = w; });
+}
+
+function closeStage2ExperienceModal() {
+    const modal = document.getElementById('stage2-experience-modal');
+    if (modal) modal.style.display = 'none';
+    const rv = document.getElementById('stage2-exp-rv-container');
+    if (rv) rv.innerHTML = '';
+    const body = document.getElementById('stage2-exp-body');
+    if (body) body.innerHTML = '';
+    stage2ExpRoadviewWidget = null;
+}
+window.closeStage2ExperienceModal = closeStage2ExperienceModal;
+
+function buildStage2RiseStackHtml(c) {
+    const total = 10;
+    let rank = parseInt(String(c && c.stage2_rank != null ? c.stage2_rank : ''), 10);
+    if (!Number.isFinite(rank) || rank < 1) rank = 1;
+    rank = Math.min(total, rank);
+    let slabs = '';
+    for (let i = 1; i <= total; i++) {
+        const isPick = i === rank;
+        const delay = (i - 1) * 0.048;
+        const w = 36 + Math.round((i / total) * 28);
+        slabs += `<div class="retail-rise-slab${isPick ? ' retail-rise-slab--listing' : ''}" style="--rs-delay:${delay}s;--rs-w:${w}px;" role="presentation">`
+            + '<span class="retail-rise-slab-inner"></span>'
+            + (isPick ? '<em class="retail-rise-pin">추천 입지</em>' : '')
+            + '</div>';
+    }
+    return `<div class="retail-rise-stack">${slabs}</div>`;
+}
+
+function buildStage2CandidateDetailBodyHtml(c, opts) {
+    const forExp = opts && opts.forExperience;
+    const closeFn = forExp ? 'closeStage2ExperienceModal' : 'closeStage2CandidateModal';
     const sc = c.scoring || {};
     const comp = sc.components || {};
     const lines = stage2CardTitleLines(c);
     const gcol = stage2GradeColor(sc.grade);
-    if (heading) heading.textContent = lines.main;
     const rp = c.region_proxy || {};
     const locLine = [rp.name, rp.distance_km != null ? `행정동 거리 약 ${Number(rp.distance_km).toFixed(2)}km` : ''].filter(Boolean).join(' · ') || '—';
     const evalR = c.eval_radius_m != null ? c.eval_radius_m : (stage2Data && stage2Data.eval_radius_m != null ? stage2Data.eval_radius_m : null);
@@ -1177,7 +1257,11 @@ window.openStage2CandidateDetail = function (idx) {
         ? `<button type="button" class="btn-naver-land" title="${escHtml2(naverTitle)}" onclick="window.openNaverLandFromDetailIdx()">월세 상가 매물 보기 (네이버)</button>`
         : `<button type="button" class="btn-naver-land" disabled title="좌표가 없어 매물 검색을 열 수 없습니다.">월세 상가 (좌표 없음)</button>`;
 
-    body.innerHTML = `
+    const rvBtn = forExp
+        ? '<button type="button" class="btn-rv" onclick="document.getElementById(\'stage2-exp-rv-container\').scrollIntoView({behavior:\'smooth\',block:\'start\'})">로드뷰로 이동</button>'
+        : '<button type="button" class="btn-rv" onclick="window.openStage2RoadviewFromDetailIdx()">거리뷰 (실경)</button>';
+
+    return `
         <div class="stage2-detail-score-pill" style="background:${gcol}18;border:2px solid ${gcol};color:${gcol};">
             <span style="font-size:22px;">${formatStage2Metric(sc.score)}</span><span style="font-size:14px;">/100</span>
             <span style="font-size:13px;margin-left:6px;">${escHtml2(sc.grade_label_ko || '')}</span>
@@ -1197,17 +1281,66 @@ window.openStage2CandidateDetail = function (idx) {
             const sm = sc.scoring_meta || {};
             const notes = Array.isArray(sm.notes) ? sm.notes : [];
             if (!notes.length) return '';
-            const body = notes.map((n) => `<p style="margin:6px 0;">${escHtml2(String(n))}</p>`).join('');
-            return `<div class="stage2-detail-section-title" style="margin-top:14px;">데이터·프록시 안내</div><div style="font-size:11px;color:#64748b;line-height:1.5;font-weight:600;">${body}</div>`;
+            const nb = notes.map((n) => `<p style="margin:6px 0;">${escHtml2(String(n))}</p>`).join('');
+            return `<div class="stage2-detail-section-title" style="margin-top:14px;">데이터·프록시 안내</div><div style="font-size:11px;color:#64748b;line-height:1.5;font-weight:600;">${nb}</div>`;
         })()}
         ${rationale}
         <div class="stage2-detail-actions no-print">
-            <button type="button" class="btn-map" onclick="window.panToStage2Candidate(window.__stage2DetailIdx); closeStage2CandidateModal();">지도로 이동 · 확대</button>
-            <button type="button" class="btn-rv" onclick="openStage2RoadviewFromDetailIdx()">거리뷰 (실경)</button>
+            <button type="button" class="btn-map" onclick="window.panToStage2Candidate(window.__stage2DetailIdx); window.${closeFn}();">지도로 이동 · 확대</button>
+            ${rvBtn}
             ${naverBtn}
-            <button type="button" class="btn-close2" onclick="closeStage2CandidateModal()">닫기</button>
+            <button type="button" class="btn-close2" onclick="window.${closeFn}()">닫기</button>
         </div>
     `;
+}
+
+window.openStage2BuildingExperience = function (idx) {
+    const arr = (stage2Data && stage2Data.top_buildings) ? stage2Data.top_buildings : [];
+    const c = arr[idx];
+    if (!c) return;
+    window.__stage2DetailIdx = idx;
+    const modal = document.getElementById('stage2-experience-modal');
+    const rvContainer = document.getElementById('stage2-exp-rv-container');
+    const expBody = document.getElementById('stage2-exp-body');
+    const titleEl = document.getElementById('stage2-exp-title');
+    if (!modal || !rvContainer || !expBody) return;
+    closeStage2CandidateModal();
+    closeStage2RoadviewModal();
+    const lines = stage2CardTitleLines(c);
+    if (titleEl) titleEl.textContent = `${lines.main} · 현장·입지`;
+    stage2ExpRoadviewWidget = null;
+    modal.style.display = 'flex';
+    initStage2RoadviewIntoElement(rvContainer, c.lat, c.lng, (w) => { stage2ExpRoadviewWidget = w; });
+    const riseStack = buildStage2RiseStackHtml(c);
+    const riseBlock = `
+        <div class="stage2-exp-rise-block">
+            <div class="stage2-detail-section-title" style="margin-bottom:10px;">건물 스캔 (추천 순위 시각화)</div>
+            <div class="retail-insight-hero" style="grid-template-columns:1fr;align-items:stretch;">
+                <div class="retail-rise-scene" style="min-height:150px;">
+                    <div class="retail-rise-vignette"></div>
+                    <div class="retail-rise-beam"></div>
+                    ${riseStack}
+                    <div class="retail-rise-ground"></div>
+                </div>
+                <p class="retail-insight-kicker" style="margin:0;">위 연출은 인상용입니다. 아래에서 점수·근거·<strong>네이버 월세 매물</strong>을 이어서 확인하세요.</p>
+            </div>
+        </div>`;
+    const detailInner = buildStage2CandidateDetailBodyHtml(c, { forExperience: true });
+    expBody.innerHTML = riseBlock + `<div class="stage2-exp-detail-wrap">${detailInner}</div>`;
+};
+
+window.openStage2CandidateDetail = function (idx) {
+    const arr = (stage2Data && stage2Data.top_buildings) ? stage2Data.top_buildings : [];
+    const c = arr[idx];
+    if (!c) return;
+    const modal = document.getElementById('stage2-candidate-modal');
+    const body = document.getElementById('stage2-candidate-modal-body');
+    const heading = document.getElementById('stage2-detail-heading');
+    if (!modal || !body) return;
+    window.__stage2DetailIdx = idx;
+    const lines = stage2CardTitleLines(c);
+    if (heading) heading.textContent = lines.main;
+    body.innerHTML = buildStage2CandidateDetailBodyHtml(c, { forExperience: false });
     modal.style.display = 'flex';
 };
 
@@ -1228,6 +1361,7 @@ function teardownStage2Ui() {
     stage2Data = null;
     closeStage2CandidateModal();
     closeStage2RoadviewModal();
+    closeStage2ExperienceModal();
     closeStage2FullscreenCompare();
     const sec = document.getElementById('stage2-report-section');
     const head = document.getElementById('stage2-report-head');
@@ -1255,7 +1389,7 @@ function drawStage2Markers(top) {
         const content = `<div class="stage2-pin-wrap" style="--s2col:${gcol}">
             <div class="stage2-pin-pulse"></div>
             <div class="stage2-pin-bubble">
-                <div class="stage2-pin-bubble-main" role="button" tabindex="0" onclick="window.openStage2CandidateDetail(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.openStage2CandidateDetail(${i});}">
+                <div class="stage2-pin-bubble-main" role="button" tabindex="0" onclick="window.openStage2BuildingExperience(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.openStage2BuildingExperience(${i});}">
                     <strong>${safeMain}</strong>
                     <span>${safeSub}</span>
                 </div>
@@ -1395,6 +1529,30 @@ function drawOneRetailListing(L) {
     retailListingOverlays.push(ov);
 }
 
+/** DB 매물 모달: 층 스택이 아래에서 올라오는 의사 3D + 데이터 오버레이 */
+function buildRetailFloorRiseStackHtml(L) {
+    let total = parseInt(String(L.floors_total != null ? L.floors_total : ''), 10);
+    if (!Number.isFinite(total) || total < 1) total = 8;
+    total = Math.min(18, Math.max(4, total));
+    let listingFloor = NaN;
+    if (L.floor != null && L.floor !== '') {
+        const pf = parseInt(String(L.floor).replace(/[^\d-]/g, ''), 10);
+        if (Number.isFinite(pf)) listingFloor = pf;
+    }
+    const inRange = Number.isFinite(listingFloor) && listingFloor >= 1 && listingFloor <= total;
+    let slabs = '';
+    for (let i = 1; i <= total; i++) {
+        const isListing = inRange && i === listingFloor;
+        const delay = (i - 1) * 0.048;
+        const w = 36 + Math.round((i / total) * 28);
+        slabs += `<div class="retail-rise-slab${isListing ? ' retail-rise-slab--listing' : ''}" style="--rs-delay:${delay}s;--rs-w:${w}px;" role="presentation">`
+            + '<span class="retail-rise-slab-inner"></span>'
+            + (isListing ? '<em class="retail-rise-pin">입지 매물</em>' : '')
+            + `</div>`;
+    }
+    return `<div class="retail-rise-stack">${slabs}</div>`;
+}
+
 window.showRetailListingPanelById = function (id) {
     const nearM = document.getElementById('nearest-retail-modal');
     if (nearM) nearM.style.display = 'none';
@@ -1404,32 +1562,49 @@ window.showRetailListingPanelById = function (id) {
     if (!L || !modal || !body) return;
     const comps = Array.isArray(L.competing_pois) ? L.competing_pois : [];
     let compHtml = '';
-    comps.forEach((p) => {
+    comps.forEach((p, idx) => {
         const nm = escHtml2(String(p.name || ''));
         const dm = p.distance_m != null ? `${escHtml2(String(p.distance_m))}m` : '';
         const k = escHtml2(String(p.kind || ''));
-        compHtml += `<li><span class="retail-d-comp-name">${nm}</span>${dm ? `<span class="retail-d-comp-m">${dm}</span>` : ''}${k ? `<span class="retail-d-comp-k">${k}</span>` : ''}</li>`;
+        const d = (0.42 + idx * 0.055).toFixed(3);
+        compHtml += `<li class="retail-d-comp-li-animate" style="--li-delay:${d}s"><span class="retail-d-comp-name">${nm}</span>${dm ? `<span class="retail-d-comp-m">${dm}</span>` : ''}${k ? `<span class="retail-d-comp-k">${k}</span>` : ''}</li>`;
     });
     if (!compHtml) {
-        compHtml = '<li class="retail-d-muted">DB <code>competing_pois</code> JSON 배열에 name, distance_m, kind 등을 넣으면 표시됩니다.</li>';
+        compHtml = '<li class="retail-d-muted retail-d-comp-li-animate" style="--li-delay:0.42s">DB <code>competing_pois</code> JSON 배열에 name, distance_m, kind 등을 넣으면 표시됩니다.</li>';
     }
-    const hRaw = L.building_height_m != null ? Number(L.building_height_m) : 40;
-    const vh = Math.min(120, Math.max(40, (Number.isFinite(hRaw) ? hRaw * 1.4 : 56)));
     const floorLine = L.floor != null ? `${L.floor}층` : '층수 미기재';
-    const ftLine = L.floors_total != null ? ` · 건물 전체 ${L.floors_total}층` : '';
+    const ftLine = L.floors_total != null ? ` · 전체 ${L.floors_total}층` : '';
+    const riseStack = buildRetailFloorRiseStackHtml(L);
+    const meta = L.meta && typeof L.meta === 'object' && !Array.isArray(L.meta)
+        ? Object.keys(L.meta).slice(0, 4).map((k) => {
+            const v = L.meta[k];
+            const s = v != null && typeof v === 'object' ? JSON.stringify(v) : String(v);
+            return `${escHtml2(k)}: ${escHtml2(s)}`;
+        }).join(' · ')
+        : '';
     body.innerHTML = `
-        <div class="retail-d-head">
-            <div class="retail-d-3d" style="--big-h:${vh}px"><div class="retail-3d-prism retail-3d-prism--large" aria-hidden="true"></div></div>
-            <div>
-                <h3 class="retail-d-title">${escHtml2(L.title || '')}</h3>
-                <p class="retail-d-loc">${escHtml2(L.address || '')}${L.address ? '<br/>' : ''}좌표 ${Number(L.lat).toFixed(5)}, ${Number(L.lng).toFixed(5)}${L.distance_from_query_m != null ? ` · 지도중심에서 약 ${escHtml2(String(L.distance_from_query_m))}m` : ''}</p>
-                <p class="retail-d-floor"><strong>${escHtml2(floorLine)}${escHtml2(ftLine)}</strong>${L.building_height_m != null ? ` · 높이 약 ${escHtml2(String(L.building_height_m))}m` : ''}</p>
+        <div class="retail-insight-hero">
+            <div class="retail-rise-scene" aria-hidden="true">
+                <div class="retail-rise-vignette"></div>
+                <div class="retail-rise-beam"></div>
+                ${riseStack}
+                <div class="retail-rise-ground"></div>
+            </div>
+            <div class="retail-insight-hero-text">
+                <p class="retail-insight-kicker">층별 스캔 (DB 기준 · 시각화)</p>
+                <h3 class="retail-d-title retail-d-title--tight">${escHtml2(L.title || '')}</h3>
+                <p class="retail-rise-chips" aria-label="매물·경쟁 요약">
+                    <span class="retail-rise-chip retail-rise-chip--floor"><strong>매물</strong> ${escHtml2(floorLine)}${escHtml2(ftLine)}</span>
+                    <span class="retail-rise-chip retail-rise-chip--rival"><strong>경쟁·근접</strong> ${comps.length}건</span>
+                </p>
             </div>
         </div>
+        <p class="retail-d-loc retail-d-loc--block">${escHtml2(L.address || '')}${L.address ? '<br/>' : ''}좌표 ${Number(L.lat).toFixed(5)}, ${Number(L.lng).toFixed(5)}${L.distance_from_query_m != null ? ` · 지도중심에서 약 ${escHtml2(String(L.distance_from_query_m))}m` : ''}${L.building_height_m != null ? `<br/>추정 높이 약 ${escHtml2(String(L.building_height_m))}m` : ''}</p>
+        ${meta ? `<p class="retail-d-meta-line">${meta}</p>` : ''}
         ${L.notes ? `<p class="retail-d-notes">${escHtml2(L.notes)}</p>` : ''}
-        <div class="retail-d-section-title">경쟁·근접 시설 (DB)</div>
+        <div class="retail-d-section-title">경쟁·근접 시설 (DB 오버레이)</div>
         <ul class="retail-d-comp-list">${compHtml}</ul>
-        <p class="retail-d-hint">지도 폴리곤은 <code>footprint</code> GeoJSON입니다. LOD 건물 3D는 Cesium/Mapbox extrusion 등 별도 SDK가 필요합니다.</p>
+        <p class="retail-d-hint">실제 영상 합성이 아니라 <strong>CSS 3D·순차 애니메이션</strong>으로 인상을 냅니다. 동일 건물 내 경쟁기관을 정확히 나누려면 DB에 건물 ID·층 단위 좌표를 넣어 주세요.</p>
     `;
     modal.style.display = 'flex';
 };
@@ -1460,7 +1635,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
         const macroShort = macroFull.length > 28 ? `${macroFull.slice(0, 26)}…` : macroFull;
         const locTitle = escHtml2(lines.sub);
         return `
-        <tr class="stage2-compare-tr" data-s2idx="${i}" onclick="window.openStage2CandidateDetail(${i})" title="탭하여 상세 리포트">
+        <tr class="stage2-compare-tr" data-s2idx="${i}" onclick="window.openStage2BuildingExperience(${i})" title="탭하여 로드뷰·입지·매물">
             <td class="s2c-rank"><span class="s2c-badge" style="background:${gcol}">${c.stage2_rank}</span></td>
             <td class="s2c-loc"><span class="s2c-loc-main">${escHtml2(lines.main)}</span><span class="s2c-loc-sub">${locTitle}</span></td>
             <td class="s2c-num s2c-score"><strong style="color:${gcol}">${formatStage2Metric(sc.score)}</strong><span class="s2c-denom">/100</span></td>
@@ -1469,7 +1644,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
             <td class="s2c-num">${formatStage2Metric(c.anchor_poi_count)}</td>
             <td class="s2c-macro" title="${escHtml2(macroFull || '—')}">${escHtml2(macroShort || '—')}</td>
             <td class="s2c-actions" onclick="event.stopPropagation();">
-                <button type="button" class="s2c-btn" onclick="window.openStage2CandidateDetail(${i})">상세</button>
+                <button type="button" class="s2c-btn" onclick="window.openStage2BuildingExperience(${i})">보기</button>
                 <button type="button" class="s2c-btn s2c-btn-map" onclick="window.panToStage2Candidate(${i})">지도</button>
                 <button type="button" class="s2c-btn s2c-btn-naver" title="월세 상가·상가주택·사무실(네이버)" onclick="window.openNaverLandForStage2Candidate(${i})">월세</button>
             </td>
@@ -1496,7 +1671,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
             </thead>
             <tbody>${rows}</tbody>
         </table>
-        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>상세 리포트</b>가 열립니다. <b>월세</b>는 해당 좌표·줌 기준 <b>월세 상가·사무실</b> 목록(네이버) 새 탭입니다. 지도 오른쪽 <b>N</b>은 1위 좌표(또는 지도 중심) 기준입니다.</p>'}
+        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>카카오 로드뷰 → 건물 스캔 → 입지 점수 → 네이버 월세 매물</b> 순으로 열립니다. 지도 오른쪽 <b>N</b>은 1위 좌표(또는 지도 중심) 기준입니다.</p>'}
     </div>`;
 }
 
@@ -1534,8 +1709,11 @@ function renderStage2FullReport(payload) {
         return;
     }
     const meta = `후보 ${payload.candidates_evaluated || 0}개 평가 → 상위 ${top.length}곳 · 권역 ${payload.regions_used || '-'}개 · 미시 반경 ${payload.eval_radius_m || '-'}m · ${escHtml2(payload.department || '')}`;
+    const frKm = payload.focus_radius_used_m != null
+        ? (Math.round(Number(payload.focus_radius_used_m) / 100) / 10)
+        : null;
     const pickExtra = payload.pick_mode === 'map_1km'
-        ? `<p class="stage2-note stage2-note--emphasis" style="margin-top:6px;line-height:1.5;">지도에서 <b>우클릭한 지점</b>을 중심으로 후보를 만들고, 그 지점에서 <b>약 1km 이내</b>에서 추천 <b>${top.length}곳</b>만 표시했습니다.</p>`
+        ? `<p class="stage2-note stage2-note--emphasis" style="margin-top:6px;line-height:1.5;">지도에서 <b>지정한 지점</b>을 중심으로 후보를 좁혔습니다. 반경 약 <b>${frKm != null ? `${frKm}km` : '1~2.4km'}</b> 안에서 추천 <b>${top.length}곳</b>${payload.requested_top_k === 5 ? ' (최대 5곳)' : ''}을 표시합니다.</p>`
         : '';
     const focusNote = payload.focus_filter_note_ko
         ? `<p class="stage2-note" style="margin-top:4px;color:#b45309;font-weight:700;">${escHtml2(payload.focus_filter_note_ko)}</p>`
@@ -1545,7 +1723,7 @@ function renderStage2FullReport(payload) {
         <p class="stage2-note">${meta}</p>
         ${pickExtra}
         ${focusNote}
-        <p class="stage2-note stage2-note--emphasis" style="margin-top:8px;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행을 누르면 상세 리포트가 열리고, 지도 말풍선과 연동됩니다.</p>
+        <p class="stage2-note stage2-note--emphasis" style="margin-top:8px;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행을 누르면 <b>로드뷰·건물 스캔·네이버 매물</b> 화면이 열리고, 지도 말풍선과 연동됩니다.</p>
         <p class="stage2-note" style="margin-top:6px;">${escHtml2(payload.disclaimer || '')}</p>`;
     compareHost.innerHTML = buildStage2CompareTableHtml(top, payload, { light: false, omitCaption: true });
     cardBox.innerHTML = '';
@@ -1663,16 +1841,17 @@ async function runStage2BuildingPickActual() {
             name: '지도 선택 지점',
             rank: Number.isFinite(pr) && pr > 0 ? pr : 1,
         }];
+        const wide = mapAnchor.map_pick_variant === 'five';
         bodyExtra = {
             focus_lat: alat,
             focus_lng: alng,
-            focus_radius_m: 1000,
-            top_k: 3,
+            focus_radius_m: wide ? 2400 : 1000,
+            top_k: wide ? 5 : 3,
         };
     } else {
         const list = resolveStage2MacroNodesFromSnapshot(snap || lastOpenedReportData, base);
         if (!list.length) {
-            alert('지금 열어둔 정밀 리포트의 권역을 찾을 수 없습니다. 결과 카드에서 해당 권역의「정밀 분석 리포트」를 연 뒤 다시 2단계를 실행해 주세요.');
+            alert('1단계 권역을 찾을 수 없습니다. Top 5 카드에서「이 권역 2단계 분석」을 누르거나, 정밀 리포트를 연 뒤 2단계를 실행해 주세요.');
             return;
         }
         nodes = list.map((rec) => ({
@@ -1681,6 +1860,7 @@ async function runStage2BuildingPickActual() {
             name: rec.name,
             rank: rec.rank,
         }));
+        bodyExtra = { top_k: 5 };
     }
     closeReportModal();
     const rp = document.getElementById('results-panel');
@@ -1800,9 +1980,20 @@ function updatePaymentModalCopyStage2() {
 function updatePaymentModalCopyStage2MapPick() {
     const pl = document.getElementById('payment-modal-purpose-line');
     const d = document.getElementById('payment-modal-desc');
-    if (pl) pl.textContent = '2단계 · 지도 우클릭 지점 주변 미시 입지';
+    if (pl) pl.textContent = '2단계 · 지도에서 지정한 지점 주변 미시 입지';
     if (d) {
-        d.innerHTML = '지도에서 <b>우클릭한 위치</b>를 중심으로 후보를 만들고, 그 지점에서 <b>약 1km 이내</b>에서 가장 유리해 보이는 입지 <b>2~3곳</b>만 골라 보여 줍니다. (1단계 추천 권역 근처에서만 가능)';
+        d.innerHTML = '지도에서 <b>선택한 위치</b>(우클릭 메뉴 또는 모바일 중앙 핀)를 중심으로, <b>넓은 반경(약 2.4km)</b> 안에서 입지 후보 <b>최대 5곳</b>을 추천합니다. (1단계 추천 권역 근처에서만 가능)';
+    }
+}
+
+function updatePaymentModalCopyStage2FromCard(rec) {
+    const pl = document.getElementById('payment-modal-purpose-line');
+    const d = document.getElementById('payment-modal-desc');
+    const name = (rec && rec.name) ? String(rec.name) : '선택 권역';
+    const rk = rec && rec.rank != null ? rec.rank : '—';
+    if (pl) pl.textContent = '2단계 · 선택한 1단계 권역 안 미시 입지';
+    if (d) {
+        d.innerHTML = `${escHtml2(name)} <b>(Top ${escHtml2(String(rk))})</b> 범위 안에서만 후보를 평가해 건물 입지 <b>약 5곳</b>을 추천합니다.`;
     }
 }
 
@@ -1929,15 +2120,76 @@ async function triggerStage2PaymentFlow() {
     document.getElementById('payment-modal').style.display = 'flex';
 }
 
-/** 1단계 완료 후 지도 우클릭 → 2단계(지점 주변 1km·상위 3곳). */
-async function triggerStage2PaymentFlowFromMapRightClick(lat, lng) {
+/** 1단계 Top 5 카드에서 바로: 해당 권역만 대상으로 2단계(약 5곳). */
+window.triggerStage2FromStage1Card = async function (index) {
+    const list = (currentAnalysisData || []).slice(0, 5);
+    const rec = list[index];
+    if (!rec || rec.lat == null || rec.lng == null) {
+        alert('권역 정보를 찾을 수 없습니다.');
+        return;
+    }
+    pendingStage2MapAnchor = null;
+    pendingStage2MacroSnapshot = {
+        lat: rec.lat,
+        lng: rec.lng,
+        rank: rec.rank,
+        name: rec.name,
+        region_name: rec.name,
+    };
+    pendingAfterPaymentAction = 'stage2';
+    updatePaymentModalCopyStage2FromCard(rec);
+    if (typeof window !== 'undefined' && window.BLUEDOT_SKIP_CREDIT_CHECK) {
+        pendingAfterPaymentAction = null;
+        runStage2BuildingPickActual();
+        return;
+    }
+    const token = typeof getToken === 'function' ? getToken() : null;
+    let credits = getCredits();
+    if (token) {
+        try {
+            const res = await fetchCredits();
+            credits = typeof res === 'number' ? res : (res || 0);
+        } catch (e) { credits = getCredits(); }
+    }
+    if (credits > 0) {
+        if (confirm(`2단계 건물(후보) 입지 분석 1회를 사용합니다. (남은 ${credits}회)\n선택 권역(Top ${rec.rank != null ? rec.rank : '—'}) 안에서만 후보를 뽑습니다. 진행할까요?`)) {
+            if (token) {
+                try {
+                    await useCreditViaApi();
+                    if (typeof fetchMe === 'function') fetchMe().then(me => me.logged_in && me.user && typeof onAuthStateChange === 'function' && onAuthStateChange(me.user));
+                } catch (e) {
+                    alert('크레딧 처리 실패. 로컬 크레딧으로 진행합니다.');
+                    useCredit();
+                }
+            } else {
+                useCredit();
+            }
+            pendingAfterPaymentAction = null;
+            runStage2BuildingPickActual();
+        } else {
+            pendingAfterPaymentAction = null;
+            pendingStage2MacroSnapshot = null;
+        }
+        return;
+    }
+    document.getElementById('payment-selected-plan').value = '';
+    document.querySelectorAll('.payment-plan-card').forEach(el => {
+        el.style.borderColor = '#e2e8f0';
+        el.style.background = '';
+    });
+    document.getElementById('payment-submit-btn').disabled = true;
+    document.getElementById('payment-modal').style.display = 'flex';
+};
+
+/** 지도에서 지정한 지점 주변 → 2단계(반경 약 2.4km·최대 5곳). 우클릭 메뉴·모바일 중앙 핀 공통. */
+async function triggerStage2PaymentFlowFromMapPointer(lat, lng) {
     const list = (currentAnalysisData || []).slice(0, 5);
     if (!list.length) {
-        alert('1단계 거시 상권 분석을 먼저 실행한 뒤, 추천 권역 근처에서 지도를 우클릭해 주세요.');
+        alert('1단계 거시 상권 분석을 먼저 실행한 뒤, 추천 권역 근처에서 다시 시도해 주세요.');
         return;
     }
     pendingStage2MacroSnapshot = null;
-    pendingStage2MapAnchor = { lat: Number(lat), lng: Number(lng) };
+    pendingStage2MapAnchor = { lat: Number(lat), lng: Number(lng), map_pick_variant: 'five' };
     pendingAfterPaymentAction = 'stage2';
     updatePaymentModalCopyStage2MapPick();
     if (typeof window !== 'undefined' && window.BLUEDOT_SKIP_CREDIT_CHECK) {
@@ -1954,7 +2206,7 @@ async function triggerStage2PaymentFlowFromMapRightClick(lat, lng) {
         } catch (e) { credits = getCredits(); }
     }
     if (credits > 0) {
-        if (confirm(`2단계(지도 우클릭 지점 · 1km 내 후보 최대 3곳) 분석 1회를 사용합니다. (남은 ${credits}회)\n진행할까요?`)) {
+        if (confirm(`2단계(지도 지점 · 반경 약 2.4km · 후보 최대 5곳) 분석 1회를 사용합니다. (남은 ${credits}회)\n진행할까요?`)) {
             if (token) {
                 try {
                     await useCreditViaApi();
@@ -1982,6 +2234,13 @@ async function triggerStage2PaymentFlowFromMapRightClick(lat, lng) {
     document.getElementById('payment-submit-btn').disabled = true;
     document.getElementById('payment-modal').style.display = 'flex';
 }
+
+window.confirmStage2RclickMenu = async function () {
+    const p = stage2RclickPendingLatLng;
+    hideStage2RclickMenu();
+    if (!p) return;
+    await triggerStage2PaymentFlowFromMapPointer(p.lat, p.lng);
+};
 
 function closePaymentModal() {
     document.getElementById('payment-modal').style.display = 'none';
@@ -2208,7 +2467,8 @@ function renderMapAndResults(data, searchRadius) {
             </div>
 
             <button class="rc-btn" onclick="openReportModal(${index}); event.stopPropagation();">정밀 분석 리포트</button>
-            <span class="rc-link-foot">상세 정보보기 · 4~5단계 지표·수식 포함</span>
+            <button type="button" class="rc-btn rc-btn-stage2" onclick="window.triggerStage2FromStage1Card(${index}); event.stopPropagation();">이 권역 2단계 분석</button>
+            <span class="rc-link-foot">2단계: 권역 안 미시 입지 약 5곳 · 정밀 리포트는 4~5단계 지표</span>
         </div>`;
     });
     
