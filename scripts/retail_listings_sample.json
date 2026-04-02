@@ -37,7 +37,9 @@
           "kind": "약국"
         }
       ],
-      "notes": "데모용 — 실제 매물 아님. footprint 는 GeoJSON Polygon, 좌표 순서 [경도,위도]."
+      "notes": "데모용 — 실제 매물 아님. footprint 는 GeoJSON Polygon, 좌표 순서 [경도,위도].",
+      "kind_code": "SG",
+      "deal_code": "B2"
     }
   ]
 }

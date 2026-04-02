@@ -143,6 +143,38 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
 .map-crosshair::before { content: ''; position: absolute; top: 11px; left: 0; width: 24px; height: 2px; background: rgba(0,0,0,0.6); }
 .map-crosshair::after { content: ''; position: absolute; top: 0; left: 11px; width: 2px; height: 24px; background: rgba(0,0,0,0.6); }
 
+/* 모바일·터치: 중앙 핀(포인터) 아래 2단계 진입 */
+.stage2-map-center-cta {
+    position: absolute;
+    left: 50%;
+    top: calc(50% + 18px);
+    transform: translateX(-50%);
+    z-index: 105;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 10px 18px;
+    border: none;
+    border-radius: 14px;
+    font-size: 14px;
+    font-weight: 900;
+    color: #fff;
+    font-family: inherit;
+    background: linear-gradient(165deg, #004085 0%, #0c4a6e 100%);
+    box-shadow: 0 6px 22px rgba(0, 64, 133, 0.38);
+    cursor: pointer;
+    white-space: nowrap;
+    max-width: calc(100vw - 40px);
+    -webkit-tap-highlight-color: transparent;
+}
+.stage2-map-center-cta:active {
+    transform: translateX(-50%) scale(0.97);
+    box-shadow: 0 4px 14px rgba(0, 64, 133, 0.3);
+}
+.stage2-map-center-cta.is-visible {
+    display: flex;
+}
+
 .map-controls { 
     position: absolute; right: 16px; top: calc(var(--topbar-height) + 80px); 
     z-index: 50; display: flex; flex-direction: column; gap: 8px; 
@@ -1467,6 +1499,17 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     cursor: pointer;
 }
 
+.ctrl-btn.nearest-pick-btn {
+    font-size: 14px;
+    font-weight: 900;
+}
+.ctrl-btn.nearest-active {
+    border: 2px solid #d97706;
+    background: rgba(245, 158, 11, 0.14);
+    box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.25);
+}
+.nearest-commercial-hint .micro-site-hint-text strong { color: #fbbf24; }
+
 .micro-site-panel {
     position: absolute;
     left: 0;
@@ -1997,3 +2040,72 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
     padding: 1px 4px;
     border-radius: 4px;
 }
+
+.nearest-retail-sub {
+    margin: 0;
+    padding: 8px 18px 0;
+    font-size: 11px;
+    font-weight: 700;
+    color: #64748b;
+}
+.nearest-retail-lead {
+    margin: 0 0 12px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #334155;
+    line-height: 1.5;
+}
+.nearest-retail-card {
+    padding: 14px;
+    border-radius: 14px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    margin-bottom: 12px;
+}
+.nearest-retail-title {
+    margin: 0 0 8px;
+    font-size: 16px;
+    font-weight: 900;
+    color: #0f172a;
+}
+.nearest-retail-meta {
+    margin: 0 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    line-height: 1.45;
+}
+.nearest-retail-foot {
+    margin: 0 0 14px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #94a3b8;
+    line-height: 1.5;
+}
+.nearest-retail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 4px;
+}
+.nearest-retail-actions .btn-map,
+.nearest-retail-actions .btn-naver-land {
+    flex: 1 1 auto;
+    min-width: 140px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 800;
+    border: none;
+    cursor: pointer;
+}
+.nearest-retail-actions .btn-map {
+    background: #0f172a;
+    color: #f8fafc;
+}
+.nearest-retail-actions .btn-map:hover { background: #1e293b; }
+.nearest-retail-actions .btn-naver-land {
+    background: #03c75a;
+    color: #fff;
+}
+.nearest-retail-actions .btn-naver-land:hover { background: #02a64a; }

@@ -148,6 +148,8 @@ class RetailListingCreate(BaseModel):
     notes: Optional[str] = None
     meta: Optional[Dict[str, Any]] = None
     is_active: bool = True
+    kind_code: Optional[str] = "SG"
+    deal_code: Optional[str] = "B2"
 
 
 class RetailListingsImportBody(BaseModel):
@@ -1576,6 +1578,11 @@ class MicroSiteStage2Request(BaseModel):
     department: str = "한의원"
     radius_m: int = 400
     nodes: List[MicroSiteStage2Node]
+    # 지도 우클릭 등: 평가 후보를 이 좌표 기준 반경(m) 안으로 한정한 뒤 top_k만 반환
+    focus_lat: Optional[float] = None
+    focus_lng: Optional[float] = None
+    focus_radius_m: float = 1000.0
+    top_k: int = 5
 
 
 def _stage2_region_cands(
@@ -1995,6 +2002,7 @@ def api_micro_site_stage2(body: MicroSiteStage2Request):
         raise HTTPException(status_code=400, detail="nodes가 비어 있습니다. 1단계 분석 결과를 보내 주세요.")
     eval_r = int(max(100, min(int(body.radius_m), 1200)))
     dept = (body.department or "한의원").strip() or "한의원"
+    top_k = int(max(2, min(int(body.top_k or 5), 5)))
     all_cands: List[Dict[str, Any]] = []
     nodes_in = list(body.nodes)[:5]
     kk = KAKAO_REST_KEY or ""
@@ -2009,16 +2017,41 @@ def api_micro_site_stage2(body: MicroSiteStage2Request):
                 nodes_in,
             ):
                 all_cands.extend(chunk)
+    pool = all_cands
+    focus_note: Optional[str] = None
+    pick_mode: Optional[str] = None
+    if body.focus_lat is not None and body.focus_lng is not None:
+        pick_mode = "map_1km"
+        fla, fln = float(body.focus_lat), float(body.focus_lng)
+        fr_m = float(max(100.0, min(float(body.focus_radius_m or 1000.0), 2500.0)))
+        filtered: List[Dict[str, Any]] = []
+        for c in all_cands:
+            try:
+                d_km = haversine_distance(fla, fln, float(c["lat"]), float(c["lng"]))
+            except (TypeError, ValueError):
+                continue
+            if d_km * 1000.0 <= fr_m:
+                filtered.append(c)
+        if filtered:
+            pool = filtered
+        else:
+            focus_note = (
+                f"지정 반경 {int(fr_m)}m 안에 평가된 후보가 없어, "
+                "전체 후보에서 상위만 표시합니다. (지도 지점을 권역 중심에 더 가깝게 찍어 보세요.)"
+            )
     # 근접 후보도 허용(지도·리스트에서 겹칠 수 있음). 완전 동일 좌표만 소간격으로 배제.
-    top5 = dedupe_pick_top(all_cands, top_k=5, min_sep_m=12.0)
-    enrich_stage2_top_with_rationale(top5)
+    top_pick = dedupe_pick_top(pool, top_k=top_k, min_sep_m=12.0)
+    enrich_stage2_top_with_rationale(top_pick)
     return {
         "status": "success",
         "department": dept,
         "eval_radius_m": eval_r,
         "regions_used": len(nodes_in),
         "candidates_evaluated": len(all_cands),
-        "top_buildings": top5,
+        "top_buildings": top_pick,
+        "requested_top_k": top_k,
+        "pick_mode": pick_mode,
+        "focus_filter_note_ko": focus_note,
         "method": "per_region_9_grid_reuse_anchors_hira",
         "disclaimer": "건물 폴리곤이 아닌 '후보 좌표' 기준 추정입니다. 현장 확인이 필요합니다.",
     }
@@ -2034,6 +2067,32 @@ def api_retail_listings(lat: float, lng: float, radius_m: float = 600.0, limit: 
     limit = int(max(1, min(limit, 300)))
     rows = db.list_retail_listings_nearby_api(lat, lng, radius_m, limit=limit)
     return {"status": "success", "count": len(rows), "radius_m": radius_m, "listings": rows}
+
+
+@app.get("/api/retail-listings/nearest")
+def api_retail_listings_nearest(
+    lat: float,
+    lng: float,
+    radius_m: float = 8000.0,
+    kind_code: str = "SG",
+    deal_code: str = "B2",
+):
+    """
+    지도에서 탭한 지점 기준, DB에 있는 **가장 가까운 1건**(기본: 상가 SG + 월세 B2).
+    네이버 실매물 목록은 공개 API가 없어 — 프론트에서 같은 좌표·줌으로 딥링크.
+    """
+    radius_m = float(max(30.0, min(radius_m, 12000.0)))
+    kc = (kind_code or "SG").strip() or "SG"
+    dc = (deal_code or "B2").strip() or "B2"
+    hit = db.nearest_retail_listing_for_anchor(lat, lng, radius_m=radius_m, kind_code=kc, deal_code=dc)
+    return {
+        "status": "success",
+        "anchor": {"lat": lat, "lng": lng},
+        "radius_m": radius_m,
+        "filters": {"kind_code": kc, "deal_code": dc},
+        "listing": hit,
+        "hint_ko": "네이버는 ms(위도,경도,줌)+a=SG+b=B2 로 해당 구역 월세 상가 목록만 좁혀 엽니다. 가장 인접 1건은 BLUEDOT DB 기준입니다.",
+    }
 
 
 @app.post("/api/retail-listings")

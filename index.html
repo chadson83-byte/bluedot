@@ -11,7 +11,7 @@
     
     <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
     
-    <link rel="stylesheet" href="style.css?v=naver-land-ui-4">
+    <link rel="stylesheet" href="style.css?v=naver-land-ui-5">
     <!-- 임시: 로그인 UI 숨김(분석 비로그인 우선). 복구 시 이 style 블록만 삭제하세요. -->
     <style id="bluedot-login-paused">
         #header-login-btn, #header-user-chip { display: none !important; }
@@ -325,7 +325,7 @@
                         <div style="flex: 1; min-width: 0;">
                             <h2 class="results-title-main">1단계 · 상위 추천 상권 (Top 5)</h2>
                             <div class="results-title-sub">4대 공공데이터 교차 검증</div>
-                            <div class="results-title-hint">지도 핀·카드로 권역을 확인한 뒤, 정밀 리포트에서 2단계(미시 입지)를 실행할 수 있습니다.</div>
+                            <div class="results-title-hint">지도 핀·카드로 권역을 확인한 뒤, PC는 <strong>지도 우클릭</strong>, 모바일은 <strong>지도를 움직여 핀을 원하는 곳에 두고</strong> 화면 중앙의 <strong>2단계 분석하기</strong> 버튼으로 주변 1km·추천 2~3곳을 열 수 있습니다. 정밀 리포트에서도 2단계를 실행할 수 있습니다.</div>
                         </div>
                         <div class="results-header-actions">
                             <div class="results-close-x" onclick="closeResults()">닫기</div>
@@ -361,6 +361,9 @@
         </div>
 
         <div class="map-crosshair"></div>
+        <button type="button" id="stage2-map-center-cta" class="stage2-map-center-cta no-print" onclick="window.triggerStage2FromMapCenter && window.triggerStage2FromMapCenter()" aria-label="핀 위치 기준 2단계 미시 입지 분석">
+            2단계 분석하기
+        </button>
         <div id="map"></div>
         <div id="hover-loading-toast" style="display:none; position:fixed; bottom:140px; left:50%; transform:translateX(-50%); background:rgba(15,23,42,0.95); color:white; padding:10px 20px; border-radius:10px; font-size:13px; font-weight:700; z-index:200; box-shadow:0 4px 12px rgba(0,0,0,0.3); pointer-events:none;">경쟁기관 조회 중...</div>
 
@@ -369,6 +372,7 @@
             <button class="ctrl-btn" onclick="zoomOut()" title="축소">-</button>
             <button type="button" class="ctrl-btn ctrl-btn-naver-land" onclick="window.openNaverLandAtMapFocus()" title="월세 상가·상가주택·사무실 목록. 2단계 후 1위 좌표·줌, 없으면 지도 중심·줌">N</button>
             <button type="button" class="ctrl-btn retail-db-toggle" id="retail-listings-toggle-btn" onclick="toggleRetailListingsLayer()" title="DB 등록 매물: 건물 외곽선·층·경쟁거리">🏢</button>
+            <button type="button" class="ctrl-btn nearest-pick-btn" id="nearest-commercial-toggle-btn" onclick="toggleNearestCommercialPickMode()" title="상가·월세: 지도를 탭하면 DB에서 가장 가까운 1건만 표시">1</button>
             <button type="button" class="ctrl-btn micro-pick-btn" id="micro-site-toggle-btn" onclick="toggleMicroSitePickMode()" title="미시 입지: 지도를 탭해 분석 (📍)">📍</button>
             <button class="ctrl-btn my-loc-btn" onclick="executeGPSLocation()" title="내 위치">
                 <svg viewBox="0 0 24 24"><polygon points="3 11 22 2 13 21 11 13 3 11"></polygon></svg>
@@ -386,6 +390,19 @@
                 </select>
             </label>
             <button type="button" class="micro-site-hint-cancel" onclick="cancelMicroSitePickMode()">취소</button>
+        </div>
+
+        <div id="nearest-commercial-hint" class="micro-site-hint nearest-commercial-hint" style="display:none;" aria-live="polite">
+            <span class="micro-site-hint-text"><strong>탭한 지점</strong>에서 가장 가까운 <strong>상가·월세</strong> DB 매물 1건</span>
+            <label class="micro-site-hint-radius">검색 반경
+                <select id="nearest-retail-radius" class="micro-site-radius-select">
+                    <option value="3000">3km</option>
+                    <option value="5000">5km</option>
+                    <option value="8000" selected>8km</option>
+                    <option value="12000">12km</option>
+                </select>
+            </label>
+            <button type="button" class="micro-site-hint-cancel" onclick="cancelNearestCommercialPickMode()">취소</button>
         </div>
 
         <div id="micro-site-panel" class="micro-site-panel" style="display:none;">
@@ -643,7 +660,7 @@
                 <div class="report-section no-print report-stage2-card" id="report-stage2-section" style="display: none;">
                     <h3 class="report-stage2-card__title">2단계 · 미시 입지 (후보 좌표)</h3>
                     <p class="report-stage2-card__lead">
-                        <strong>지금 이 리포트에 해당하는 1단계 권역 한 곳</strong> 안에서만 후보 지점을 점수화해 <strong>상위 3~5곳</strong>을 뽑고 지도에 표시합니다. (추가 1회권 · 다른 Top 카드는 해당 카드에서 리포트를 연 뒤 2단계를 실행하세요.)
+                        <strong>지금 이 리포트에 해당하는 1단계 권역 한 곳</strong> 안에서만 후보 지점을 점수화해 <strong>상위 3~5곳</strong>을 뽑고 지도에 표시합니다. (추가 1회권) 또는 결과 화면에서 <strong>지도 우클릭</strong>으로 관심 지점 주변 <strong>1km·2~3곳</strong>만 빠르게 볼 수 있습니다.
                     </p>
                     <div id="report-stage2-done" class="report-stage2-card__done" style="display: none;">2단계 분석이 완료되었습니다. 지도의 후보 핀과 결과 패널에서 확인하세요.</div>
                     <button type="button" id="report-stage2-cta-btn" class="report-stage2-cta-btn" onclick="triggerStage2PaymentFlowFromReport()">2단계 분석하기</button>
@@ -689,6 +706,17 @@
             </div>
         </div>
 
+        <div id="nearest-retail-modal" class="modal-overlay retail-listing-overlay" style="display: none; z-index: 8645;" role="dialog" aria-modal="true" aria-labelledby="nearest-retail-modal-title">
+            <div class="retail-listing-sheet nearest-retail-sheet">
+                <div class="retail-listing-toolbar no-print">
+                    <h2 id="nearest-retail-modal-title" class="retail-listing-modal-title">가장 인접 상가·월세 (DB)</h2>
+                    <button type="button" class="stage2-detail-close" onclick="closeNearestRetailModal()" aria-label="닫기">✕</button>
+                </div>
+                <p class="nearest-retail-sub" id="nearest-retail-modal-sub"></p>
+                <div id="nearest-retail-modal-body" class="retail-listing-body"></div>
+            </div>
+        </div>
+
         <div id="retail-listing-modal" class="modal-overlay retail-listing-overlay" style="display: none; z-index: 8650;" role="dialog" aria-modal="true" aria-labelledby="retail-listing-modal-title">
             <div class="retail-listing-sheet">
                 <div class="retail-listing-toolbar no-print">
@@ -702,7 +730,7 @@
     </div>
 
     <script src="auth.js"></script>
-    <script src="app.js?v=naver-land-ui-4"></script>
+    <script src="app.js?v=stage2-map-center-cta-1"></script>
     <script>
         // =========================================================
         // 🚀 1. GPS 기반 내 위치 자동 설정 및 주소 변환 로직

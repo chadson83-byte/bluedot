@@ -385,6 +385,11 @@ let lastOpenedReportData = null;
 let microSitePickMode = false;
 let microSiteMapObjects = [];
 
+/** 상가·월세: 지도 탭 지점에서 DB 최근접 1건만 조회 (/api/retail-listings/nearest) */
+let nearestCommercialPickMode = false;
+/** { lat, lng } — 모달에서 네이버(탭 좌표·고줌) 열기용 */
+window.__nearestRetailAnchor = null;
+
 /** 2단계: 1차 Top5 권역 → 건물(후보) 입지 Top5 */
 let stage2MapObjects = [];
 let stage2Data = null;
@@ -403,6 +408,10 @@ let retailListingsById = {};
 let pendingAfterPaymentAction = null;
 /** 2단계: 정밀 리포트에서 연 1단계 권역 1곳만 보내기 위한 스냅샷 (결제 대기 중에도 유지) */
 let pendingStage2MacroSnapshot = null;
+/** 2단계: 지도 우클릭 지점 { lat, lng } — 해당 좌표를 그리드 중심으로 후보 산출 */
+let pendingStage2MapAnchor = null;
+/** 1단계 권역 중 우클릭과 너무 먼 곳에서 2단계 방지 (m) */
+const BLUEDOT_STAGE2_MAP_MAX_DIST_FROM_MACRO_M = 4500;
 
 /** 카카오 coord2RegionCode — idle마다 호출 시 429. 디바운스·이동 임계·간격·백오프 */
 const KAKAO_REGION_DEBOUNCE_MS = 650;
@@ -423,6 +432,41 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
         + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lng2 - lng1) * p)) / 2;
     return R * 2 * Math.asin(Math.sqrt(Math.min(1, Math.max(0, a))));
 }
+
+let _stage2MapCenterCtaIdleTimer = null;
+
+function isMobileStage2CtaTarget() {
+    try {
+        if (window.matchMedia('(max-width: 768px)').matches) return true;
+        if (window.matchMedia('(pointer: coarse)').matches && window.matchMedia('(hover: none)').matches) return true;
+    } catch (_) { /* ignore */ }
+    return false;
+}
+
+function scheduleSyncStage2MapCenterCta() {
+    clearTimeout(_stage2MapCenterCtaIdleTimer);
+    _stage2MapCenterCtaIdleTimer = setTimeout(syncStage2MapCenterCta, 320);
+}
+
+function syncStage2MapCenterCta() {
+    const el = document.getElementById('stage2-map-center-cta');
+    if (!el) return;
+    const show = isMobileStage2CtaTarget()
+        && typeof map !== 'undefined' && map
+        && Array.isArray(currentAnalysisData)
+        && currentAnalysisData.length > 0
+        && !microSitePickMode
+        && !nearestCommercialPickMode;
+    el.classList.toggle('is-visible', show);
+}
+
+/** 모바일: 지도 중심(핀) 위치로 2단계 — 우클릭 경로와 동일 */
+window.triggerStage2FromMapCenter = function () {
+    if (!map || typeof map.getCenter !== 'function') return;
+    const c = map.getCenter();
+    if (!c) return;
+    triggerStage2PaymentFlowFromMapRightClick(c.getLat(), c.getLng());
+};
 
 function getKakaoGeocoderSingleton() {
     if (!_kakaoGeocoderSingleton && typeof kakao !== 'undefined' && kakao.maps && kakao.maps.services) {
@@ -490,15 +534,39 @@ function initMap() {
         const defaultLatLng = new kakao.maps.LatLng(35.1631, 129.1636); 
         map = new kakao.maps.Map(mapContainer, { center: defaultLatLng, level: 6 });
 
+        try {
+            mapContainer.addEventListener('contextmenu', function (ev) {
+                ev.preventDefault();
+            });
+        } catch (_) { /* ignore */ }
+
+        kakao.maps.event.addListener(map, 'rightclick', function (mouseEvent) {
+            if (microSitePickMode || nearestCommercialPickMode) return;
+            if (!mouseEvent || !mouseEvent.latLng) return;
+            if (!Array.isArray(currentAnalysisData) || currentAnalysisData.length === 0) return;
+            try {
+                triggerStage2PaymentFlowFromMapRightClick(mouseEvent.latLng.getLat(), mouseEvent.latLng.getLng());
+            } catch (e) {
+                console.warn('[BLUEDOT] stage2 map rightclick', e);
+            }
+        });
+
         kakao.maps.event.addListener(map, 'idle', scheduleCenterRegionUpdate);
         kakao.maps.event.addListener(map, 'idle', scheduleRetailListingsFetchDebounced);
+        kakao.maps.event.addListener(map, 'idle', scheduleSyncStage2MapCenterCta);
         setTimeout(scheduleCenterRegionUpdate, 900);
         setTimeout(scheduleRetailListingsFetchDebounced, 1500);
+        setTimeout(scheduleSyncStage2MapCenterCta, 400);
 
         kakao.maps.event.addListener(map, 'click', function (mouseEvent) {
             if (microSitePickMode && mouseEvent && mouseEvent.latLng) {
                 const ll = mouseEvent.latLng;
                 runMicroSiteAnalysis(ll.getLat(), ll.getLng());
+                return;
+            }
+            if (nearestCommercialPickMode && mouseEvent && mouseEvent.latLng) {
+                const ll = mouseEvent.latLng;
+                runNearestCommercialAt(ll.getLat(), ll.getLng());
                 return;
             }
             infoWindows.forEach(iw => iw.setMap(null));
@@ -518,6 +586,11 @@ function displayCenterInfo(result, status) {
 }
 
 window.addEventListener('load', () => {
+    try {
+        window.addEventListener('resize', scheduleSyncStage2MapCenterCta, { passive: true });
+    } catch (_) {
+        window.addEventListener('resize', scheduleSyncStage2MapCenterCta);
+    }
     loadKakaoMapsScript()
         .then(() => initMap())
         .catch((e) => {
@@ -619,9 +692,14 @@ function teardownMicroSiteUi() {
     if (btn) btn.classList.remove('micro-active');
     const hint = document.getElementById('micro-site-hint');
     if (hint) hint.style.display = 'none';
+    cancelNearestCommercialPickMode();
+    scheduleSyncStage2MapCenterCta();
 }
 
 function toggleMicroSitePickMode() {
+    if (!microSitePickMode) {
+        cancelNearestCommercialPickMode();
+    }
     microSitePickMode = !microSitePickMode;
     const btn = document.getElementById('micro-site-toggle-btn');
     const hint = document.getElementById('micro-site-hint');
@@ -630,6 +708,7 @@ function toggleMicroSitePickMode() {
     if (microSitePickMode) {
         infoWindows.forEach((iw) => iw.setMap(null));
     }
+    scheduleSyncStage2MapCenterCta();
 }
 
 function cancelMicroSitePickMode() {
@@ -638,7 +717,120 @@ function cancelMicroSitePickMode() {
     const hint = document.getElementById('micro-site-hint');
     if (btn) btn.classList.remove('micro-active');
     if (hint) hint.style.display = 'none';
+    scheduleSyncStage2MapCenterCta();
 }
+
+function cancelNearestCommercialPickMode() {
+    nearestCommercialPickMode = false;
+    const btn = document.getElementById('nearest-commercial-toggle-btn');
+    const hint = document.getElementById('nearest-commercial-hint');
+    if (btn) btn.classList.remove('nearest-active');
+    if (hint) hint.style.display = 'none';
+    scheduleSyncStage2MapCenterCta();
+}
+
+function toggleNearestCommercialPickMode() {
+    if (!nearestCommercialPickMode) {
+        cancelMicroSitePickMode();
+    }
+    nearestCommercialPickMode = !nearestCommercialPickMode;
+    const btn = document.getElementById('nearest-commercial-toggle-btn');
+    const hint = document.getElementById('nearest-commercial-hint');
+    if (btn) btn.classList.toggle('nearest-active', nearestCommercialPickMode);
+    if (hint) hint.style.display = nearestCommercialPickMode ? 'flex' : 'none';
+    if (nearestCommercialPickMode) {
+        infoWindows.forEach((iw) => iw.setMap(null));
+    }
+    scheduleSyncStage2MapCenterCta();
+}
+
+async function runNearestCommercialAt(lat, lng) {
+    nearestCommercialPickMode = false;
+    const btn = document.getElementById('nearest-commercial-toggle-btn');
+    const hint = document.getElementById('nearest-commercial-hint');
+    if (btn) btn.classList.remove('nearest-active');
+    if (hint) hint.style.display = 'none';
+    scheduleSyncStage2MapCenterCta();
+
+    window.__nearestRetailAnchor = { lat, lng };
+
+    const radiusSel = document.getElementById('nearest-retail-radius');
+    const radiusM = radiusSel ? parseInt(radiusSel.value, 10) || 8000 : 8000;
+    const q = new URLSearchParams({
+        lat: String(lat),
+        lng: String(lng),
+        radius_m: String(radiusM),
+        kind_code: 'SG',
+        deal_code: 'B2',
+    });
+    const url = `${bluedotBackendOrigin()}/api/retail-listings/nearest?${q.toString()}`;
+
+    const modal = document.getElementById('nearest-retail-modal');
+    const body = document.getElementById('nearest-retail-modal-body');
+    const sub = document.getElementById('nearest-retail-modal-sub');
+    if (!modal || !body) return;
+    if (sub) sub.textContent = `${Number(lat).toFixed(5)}, ${Number(lng).toFixed(5)} · 반경 ${radiusM}m · 상가(SG)+월세(B2)`;
+    body.innerHTML = '<p class="micro-site-loading">가장 가까운 매물 조회 중…</p>';
+    modal.style.display = 'flex';
+
+    try {
+        const res = await fetchWithTimeout(url, { timeout: 60000 });
+        const data = await parseJsonSafe(res);
+        if (!res.ok) {
+            body.innerHTML = `<p class="micro-err">${bluedotApiErrorMessage(res, data)}</p>`;
+            return;
+        }
+        const listing = data && data.listing;
+        if (listing && listing.id != null) {
+            const d = listing.distance_from_query_m != null
+                ? `탭한 지점에서 약 <strong>${escHtml2(String(listing.distance_from_query_m))}m</strong>`
+                : '';
+            body.innerHTML = `
+                <p class="nearest-retail-lead">DB 기준 <strong>가장 인접한 1건</strong>입니다. (상가·월세 필터)</p>
+                <div class="nearest-retail-card">
+                    <h3 class="nearest-retail-title">${escHtml2(listing.title || '')}</h3>
+                    <p class="nearest-retail-meta">${escHtml2(listing.address || '')}</p>
+                    <p class="nearest-retail-meta">${d}</p>
+                    <p class="nearest-retail-meta">좌표 ${Number(listing.lat).toFixed(5)}, ${Number(listing.lng).toFixed(5)}</p>
+                </div>
+                <p class="nearest-retail-foot">${escHtml2((data && data.hint_ko) || '')}</p>
+                <div class="nearest-retail-actions no-print">
+                    <button type="button" class="btn-map" onclick="window.closeNearestRetailModal();window.showRetailListingPanelById(${Number(listing.id)})">상세(건물·경쟁 POI)</button>
+                    <button type="button" class="btn-naver-land" onclick="window.openNaverLandNearestAnchor()">네이버 · 탭 지점 근처 월세 상가</button>
+                </div>
+            `;
+        } else {
+            body.innerHTML = `
+                <p class="nearest-retail-lead">이 반경 안에 <strong>상가(SG)+월세(B2)</strong>로 등록된 DB 매물이 없습니다.</p>
+                <p class="nearest-retail-foot">${escHtml2((data && data.hint_ko) || '')}</p>
+                <div class="nearest-retail-actions no-print">
+                    <button type="button" class="btn-naver-land" onclick="window.openNaverLandNearestAnchor()">네이버 · 탭 지점 근처 월세 상가 목록</button>
+                </div>
+            `;
+        }
+    } catch (e) {
+        body.innerHTML = `<p class="micro-err">${(e && e.message) ? String(e.message) : '연결 실패'}</p>`;
+    }
+}
+
+window.closeNearestRetailModal = function () {
+    const modal = document.getElementById('nearest-retail-modal');
+    if (modal) modal.style.display = 'none';
+};
+
+window.openNaverLandNearestAnchor = function () {
+    const a = window.__nearestRetailAnchor;
+    if (!a || !Number.isFinite(Number(a.lat)) || !Number.isFinite(Number(a.lng))) {
+        alert('먼저 지도에서 위치를 탭해 주세요.');
+        return false;
+    }
+    return openNaverLandArticles(
+        a.lat,
+        a.lng,
+        BLUEDOT_NAVER_LAND_ZOOM_LOCAL,
+        NAVER_LAND_OPTS_COMMERCIAL_MONTHLY,
+    );
+};
 
 function closeMicroSitePanel() {
     const panel = document.getElementById('micro-site-panel');
@@ -796,8 +988,20 @@ function formatStage2Metric(v) {
 /** 네이버 부동산: 상가·상가주택·사무실 + 월세(B2) + 실매물(RETAIL). ms=지도중심·줌으로 해당 구역 목록 */
 const BLUEDOT_NAVER_LAND_ARTICLES_BASE = 'https://new.land.naver.com/articles';
 const BLUEDOT_NAVER_LAND_ZOOM = 16;
+/** 탭 지점 기준 목록을 동·로 구역에 가깝게 */
+const BLUEDOT_NAVER_LAND_ZOOM_LOCAL = 17;
+/** 상가만 + 월세 — 네이버 UI의 상가·월세 필터에 맞춤 */
+const NAVER_LAND_OPTS_COMMERCIAL_MONTHLY = { propertyTypes: 'SG', tradeTypes: 'B2', retailFilter: 'RETAIL' };
 
-function buildNaverLandArticlesUrl(lat, lng, zoom) {
+/**
+ * @param {number} lat
+ * @param {number} lng
+ * @param {number} zoom
+ * @param {{ propertyTypes?: string, tradeTypes?: string, retailFilter?: string }} [opts]
+ * opts 생략 시: 상가+상가주택+사무실(SG:SGJT:SM), 월세 B2, RETAIL (기존 동작)
+ */
+function buildNaverLandArticlesUrl(lat, lng, zoom, opts) {
+    opts = opts || {};
     const la = Number(lat);
     const ln = Number(lng);
     const z = zoom != null && zoom !== '' ? Math.round(Number(zoom)) : BLUEDOT_NAVER_LAND_ZOOM;
@@ -805,9 +1009,9 @@ function buildNaverLandArticlesUrl(lat, lng, zoom) {
     if (la < -90 || la > 90 || ln < -180 || ln > 180) return null;
     if (!Number.isFinite(z) || z < 1 || z > 22) return null;
     const ms = `${la},${ln},${z}`;
-    const a = 'SG:SGJT:SM';
-    const b = 'B2';
-    const e = 'RETAIL';
+    const a = opts.propertyTypes != null ? String(opts.propertyTypes) : 'SG:SGJT:SM';
+    const b = opts.tradeTypes != null ? String(opts.tradeTypes) : 'B2';
+    const e = opts.retailFilter != null ? String(opts.retailFilter) : 'RETAIL';
     const q = [
         `ms=${encodeURIComponent(ms)}`,
         `a=${encodeURIComponent(a)}`,
@@ -817,8 +1021,8 @@ function buildNaverLandArticlesUrl(lat, lng, zoom) {
     return `${BLUEDOT_NAVER_LAND_ARTICLES_BASE}?${q}`;
 }
 
-function openNaverLandArticles(lat, lng, zoom) {
-    const url = buildNaverLandArticlesUrl(lat, lng, zoom != null ? zoom : BLUEDOT_NAVER_LAND_ZOOM);
+function openNaverLandArticles(lat, lng, zoom, opts) {
+    const url = buildNaverLandArticlesUrl(lat, lng, zoom != null ? zoom : BLUEDOT_NAVER_LAND_ZOOM, opts);
     if (!url) {
         alert('유효한 좌표가 없어 네이버 부동산을 열 수 없습니다.');
         return false;
@@ -1192,6 +1396,8 @@ function drawOneRetailListing(L) {
 }
 
 window.showRetailListingPanelById = function (id) {
+    const nearM = document.getElementById('nearest-retail-modal');
+    if (nearM) nearM.style.display = 'none';
     const L = retailListingsById[id];
     const modal = document.getElementById('retail-listing-modal');
     const body = document.getElementById('retail-listing-modal-body');
@@ -1328,9 +1534,17 @@ function renderStage2FullReport(payload) {
         return;
     }
     const meta = `후보 ${payload.candidates_evaluated || 0}개 평가 → 상위 ${top.length}곳 · 권역 ${payload.regions_used || '-'}개 · 미시 반경 ${payload.eval_radius_m || '-'}m · ${escHtml2(payload.department || '')}`;
+    const pickExtra = payload.pick_mode === 'map_1km'
+        ? `<p class="stage2-note stage2-note--emphasis" style="margin-top:6px;line-height:1.5;">지도에서 <b>우클릭한 지점</b>을 중심으로 후보를 만들고, 그 지점에서 <b>약 1km 이내</b>에서 추천 <b>${top.length}곳</b>만 표시했습니다.</p>`
+        : '';
+    const focusNote = payload.focus_filter_note_ko
+        ? `<p class="stage2-note" style="margin-top:4px;color:#b45309;font-weight:700;">${escHtml2(payload.focus_filter_note_ko)}</p>`
+        : '';
     head.innerHTML = `
         <div class="stage2-title">2단계 · 후보 비교 (Top ${top.length})</div>
         <p class="stage2-note">${meta}</p>
+        ${pickExtra}
+        ${focusNote}
         <p class="stage2-note stage2-note--emphasis" style="margin-top:8px;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행을 누르면 상세 리포트가 열리고, 지도 말풍선과 연동됩니다.</p>
         <p class="stage2-note" style="margin-top:6px;">${escHtml2(payload.disclaimer || '')}</p>`;
     compareHost.innerHTML = buildStage2CompareTableHtml(top, payload, { light: false, omitCaption: true });
@@ -1395,28 +1609,82 @@ function resolveStage2MacroNodesFromSnapshot(snapshot, base) {
     return [];
 }
 
+/** 우클릭 지점이 어느 1단계 권역 맥락인지(거리 m 포함) */
+function findNearestMacroRegion(lat, lng, regions) {
+    if (!Array.isArray(regions) || regions.length === 0) return null;
+    let best = null;
+    let bestD = Infinity;
+    regions.forEach((r) => {
+        if (!r || r.lat == null || r.lng == null) return;
+        const la = Number(r.lat);
+        const ln = Number(r.lng);
+        if (!Number.isFinite(la) || !Number.isFinite(ln)) return;
+        const d = haversineMeters(lat, lng, la, ln);
+        if (d < bestD) {
+            bestD = d;
+            best = Object.assign({}, r, { dist_m: d });
+        }
+    });
+    return best;
+}
+
 async function runStage2BuildingPickActual() {
     const snap = pendingStage2MacroSnapshot;
+    const mapAnchor = pendingStage2MapAnchor;
     pendingStage2MacroSnapshot = null;
+    pendingStage2MapAnchor = null;
     const base = currentAnalysisData || [];
     if (!base.length) {
         alert('1단계 분석 결과(Top 5 권역)가 없습니다. 먼저 거시 상권 분석을 실행하세요.');
         return;
     }
-    const list = resolveStage2MacroNodesFromSnapshot(snap || lastOpenedReportData, base);
-    if (!list.length) {
-        alert('지금 열어둔 정밀 리포트의 권역을 찾을 수 없습니다. 결과 카드에서 해당 권역의「정밀 분석 리포트」를 연 뒤 다시 2단계를 실행해 주세요.');
-        return;
+    let nodes;
+    let bodyExtra = {};
+    if (mapAnchor && mapAnchor.lat != null && mapAnchor.lng != null) {
+        const alat = Number(mapAnchor.lat);
+        const alng = Number(mapAnchor.lng);
+        if (!Number.isFinite(alat) || !Number.isFinite(alng)) {
+            alert('좌표가 올바르지 않습니다.');
+            return;
+        }
+        const nearest = findNearestMacroRegion(alat, alng, base);
+        if (!nearest || nearest.dist_m > BLUEDOT_STAGE2_MAP_MAX_DIST_FROM_MACRO_M) {
+            const dm = nearest && Number.isFinite(nearest.dist_m) ? Math.round(nearest.dist_m) : null;
+            alert(
+                `우클릭한 위치가 1단계 추천 권역에서 너무 멉니다${dm != null ? `(가장 가까운 권역까지 약 ${dm}m)` : ''}.\n`
+                + '추천 권역(지도 핀·카드) 근처에서 다시 우클릭해 주세요.',
+            );
+            return;
+        }
+        const pr = nearest.rank != null ? Number(nearest.rank) : 1;
+        nodes = [{
+            lat: alat,
+            lng: alng,
+            name: '지도 선택 지점',
+            rank: Number.isFinite(pr) && pr > 0 ? pr : 1,
+        }];
+        bodyExtra = {
+            focus_lat: alat,
+            focus_lng: alng,
+            focus_radius_m: 1000,
+            top_k: 3,
+        };
+    } else {
+        const list = resolveStage2MacroNodesFromSnapshot(snap || lastOpenedReportData, base);
+        if (!list.length) {
+            alert('지금 열어둔 정밀 리포트의 권역을 찾을 수 없습니다. 결과 카드에서 해당 권역의「정밀 분석 리포트」를 연 뒤 다시 2단계를 실행해 주세요.');
+            return;
+        }
+        nodes = list.map((rec) => ({
+            lat: rec.lat,
+            lng: rec.lng,
+            name: rec.name,
+            rank: rec.rank,
+        }));
     }
     closeReportModal();
     const rp = document.getElementById('results-panel');
     if (rp) rp.style.display = 'block';
-    const nodes = list.map((rec) => ({
-        lat: rec.lat,
-        lng: rec.lng,
-        name: rec.name,
-        rank: rec.rank,
-    }));
     const dept = selectedDeptName || '한의원';
     const radiusSel = document.getElementById('micro-site-radius');
     const radius_m = radiusSel ? parseInt(radiusSel.value, 10) || 400 : 400;
@@ -1433,11 +1701,12 @@ async function runStage2BuildingPickActual() {
         if (compareHost) compareHost.innerHTML = '';
         if (toolbar) toolbar.style.display = 'none';
     }
+    const postBody = Object.assign({ department: dept, radius_m, nodes }, bodyExtra);
     try {
         const response = await fetchWithTimeout(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ department: dept, radius_m, nodes }),
+            body: JSON.stringify(postBody),
             timeout: 180000,
         });
         const data = await parseJsonSafe(response);
@@ -1528,8 +1797,18 @@ function updatePaymentModalCopyStage2() {
     }
 }
 
+function updatePaymentModalCopyStage2MapPick() {
+    const pl = document.getElementById('payment-modal-purpose-line');
+    const d = document.getElementById('payment-modal-desc');
+    if (pl) pl.textContent = '2단계 · 지도 우클릭 지점 주변 미시 입지';
+    if (d) {
+        d.innerHTML = '지도에서 <b>우클릭한 위치</b>를 중심으로 후보를 만들고, 그 지점에서 <b>약 1km 이내</b>에서 가장 유리해 보이는 입지 <b>2~3곳</b>만 골라 보여 줍니다. (1단계 추천 권역 근처에서만 가능)';
+    }
+}
+
 async function triggerPaymentFlow() {
     if (!selectedDeptName) { alert("분석할 대상을 먼저 선택해주세요."); return; }
+    pendingStage2MapAnchor = null;
     pendingAfterPaymentAction = 'macro';
     updatePaymentModalCopyStage1();
     if (typeof window !== 'undefined' && window.BLUEDOT_SKIP_CREDIT_CHECK) {
@@ -1599,6 +1878,7 @@ async function triggerStage2PaymentFlow() {
         alert('1단계 분석 결과(Top 5 권역)가 없습니다. 먼저 거시 상권 분석을 실행하세요.');
         return;
     }
+    pendingStage2MapAnchor = null;
     if (!lastOpenedReportData || lastOpenedReportData.lat == null || lastOpenedReportData.lng == null) {
         alert('2단계는 지금 보고 있는 정밀 리포트의 권역만 분석합니다. 먼저 Top 5 중 원하는 권역의「정밀 분석 리포트」를 여세요.');
         return;
@@ -1649,10 +1929,65 @@ async function triggerStage2PaymentFlow() {
     document.getElementById('payment-modal').style.display = 'flex';
 }
 
+/** 1단계 완료 후 지도 우클릭 → 2단계(지점 주변 1km·상위 3곳). */
+async function triggerStage2PaymentFlowFromMapRightClick(lat, lng) {
+    const list = (currentAnalysisData || []).slice(0, 5);
+    if (!list.length) {
+        alert('1단계 거시 상권 분석을 먼저 실행한 뒤, 추천 권역 근처에서 지도를 우클릭해 주세요.');
+        return;
+    }
+    pendingStage2MacroSnapshot = null;
+    pendingStage2MapAnchor = { lat: Number(lat), lng: Number(lng) };
+    pendingAfterPaymentAction = 'stage2';
+    updatePaymentModalCopyStage2MapPick();
+    if (typeof window !== 'undefined' && window.BLUEDOT_SKIP_CREDIT_CHECK) {
+        pendingAfterPaymentAction = null;
+        await runStage2BuildingPickActual();
+        return;
+    }
+    const token = typeof getToken === 'function' ? getToken() : null;
+    let credits = getCredits();
+    if (token) {
+        try {
+            const res = await fetchCredits();
+            credits = typeof res === 'number' ? res : (res || 0);
+        } catch (e) { credits = getCredits(); }
+    }
+    if (credits > 0) {
+        if (confirm(`2단계(지도 우클릭 지점 · 1km 내 후보 최대 3곳) 분석 1회를 사용합니다. (남은 ${credits}회)\n진행할까요?`)) {
+            if (token) {
+                try {
+                    await useCreditViaApi();
+                    if (typeof fetchMe === 'function') fetchMe().then(me => me.logged_in && me.user && typeof onAuthStateChange === 'function' && onAuthStateChange(me.user));
+                } catch (e) {
+                    alert('크레딧 처리 실패. 로컬 크레딧으로 진행합니다.');
+                    useCredit();
+                }
+            } else {
+                useCredit();
+            }
+            pendingAfterPaymentAction = null;
+            await runStage2BuildingPickActual();
+        } else {
+            pendingAfterPaymentAction = null;
+            pendingStage2MapAnchor = null;
+        }
+        return;
+    }
+    document.getElementById('payment-selected-plan').value = '';
+    document.querySelectorAll('.payment-plan-card').forEach(el => {
+        el.style.borderColor = '#e2e8f0';
+        el.style.background = '';
+    });
+    document.getElementById('payment-submit-btn').disabled = true;
+    document.getElementById('payment-modal').style.display = 'flex';
+}
+
 function closePaymentModal() {
     document.getElementById('payment-modal').style.display = 'none';
     pendingAfterPaymentAction = null;
     pendingStage2MacroSnapshot = null;
+    pendingStage2MapAnchor = null;
 }
 
 function selectPaymentPlan(plan) {
@@ -1746,6 +2081,7 @@ function renderMapAndResults(data, searchRadius) {
         document.getElementById('analysis-panel').classList.remove('hidden-mode');
         const container = document.getElementById('results-cards-container');
         if (container) container.innerHTML = '';
+        scheduleSyncStage2MapCenterCta();
         return;
     }
 
@@ -1885,6 +2221,7 @@ function renderMapAndResults(data, searchRadius) {
     document.getElementById('analysis-panel').classList.add('hidden-mode');
     document.getElementById('results-panel').style.display = 'block';
     setupHoverHospitalFetch();
+    scheduleSyncStage2MapCenterCta();
 }
 
 window.panMapToNode = function(lat, lng) {
@@ -1906,6 +2243,8 @@ window.panMapToNode = function(lat, lng) {
 
 async function startAnalysis() {
     if (!map) return;
+    const cta = document.getElementById('stage2-map-center-cta');
+    if (cta) cta.classList.remove('is-visible');
     const center = map.getCenter();
     const radius = document.getElementById('analysis-radius').value;
 

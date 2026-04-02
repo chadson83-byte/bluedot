@@ -6,7 +6,7 @@ import json
 import math
 from datetime import datetime
 from contextlib import contextmanager
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _DEFAULT_DB_FILE = os.path.join(_BASE, "bluedot.db")
@@ -100,6 +100,34 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_retail_listings_lat_lng ON retail_listings(lat, lng);
             CREATE INDEX IF NOT EXISTS idx_retail_listings_active ON retail_listings(is_active);
         """)
+        _migrate_retail_listings_columns(conn)
+
+
+def _migrate_retail_listings_columns(conn: sqlite3.Connection) -> None:
+    cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='retail_listings'")
+    if not cur.fetchone():
+        return
+    cur = conn.execute("PRAGMA table_info(retail_listings)")
+    cols = {row[1] for row in cur.fetchall()}
+    if "kind_code" not in cols:
+        conn.execute("ALTER TABLE retail_listings ADD COLUMN kind_code TEXT DEFAULT 'SG'")
+    if "deal_code" not in cols:
+        conn.execute("ALTER TABLE retail_listings ADD COLUMN deal_code TEXT DEFAULT 'B2'")
+
+
+def _row_matches_listing_filter(row: Dict[str, Any], kind: str = "SG", deal: str = "B2") -> bool:
+    """네이버 a=상가(SG), b=월세(B2) 에 맞는 행만."""
+    k = (row.get("kind_code") or "SG").strip().upper()
+    d = (row.get("deal_code") or "B2").strip().upper()
+    if deal and deal.upper() == "B2":
+        if d and d != "B2":
+            return False
+    if kind and kind.upper() == "SG":
+        if not k or k == "SG":
+            return True
+        parts = [p.strip() for p in k.split(":") if p.strip()]
+        return "SG" in parts
+    return True
 
 
 def get_or_create_user(provider: str, provider_id: str, email: str = None, name: str = None) -> int:
@@ -229,7 +257,7 @@ def _haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
 
 def list_retail_listings_nearby(lat: float, lng: float, radius_m: float, limit: int = 200) -> List[Dict[str, Any]]:
     """활성 매물만 반경 필터 (대략 bbox 후 정밀 거리)."""
-    radius_m = float(max(10.0, min(radius_m, 5000.0)))
+    radius_m = float(max(10.0, min(radius_m, 12000.0)))
     limit = int(max(1, min(limit, 500)))
     dlat = radius_m / 110574.0
     dlng = radius_m / max(1e-6, 111320.0 * math.cos(math.radians(lat)))
@@ -270,6 +298,8 @@ def _serialize_listing_row(r: Dict[str, Any]) -> Dict[str, Any]:
         "notes": r.get("notes"),
         "is_active": bool(r.get("is_active", 1)),
         "distance_from_query_m": r.get("distance_from_query_m"),
+        "kind_code": r.get("kind_code") or "SG",
+        "deal_code": r.get("deal_code") or "B2",
     }
     fp = r.get("footprint_geojson")
     if fp:
@@ -303,6 +333,21 @@ def list_retail_listings_nearby_api(lat: float, lng: float, radius_m: float, lim
     return [_serialize_listing_row(r) for r in raw]
 
 
+def nearest_retail_listing_for_anchor(
+    lat: float,
+    lng: float,
+    radius_m: float = 8000.0,
+    kind_code: str = "SG",
+    deal_code: str = "B2",
+) -> Optional[Dict[str, Any]]:
+    """탭한 좌표에서 가장 가까운 1건(상가·월세 필터). 거리순 첫 매칭."""
+    raw = list_retail_listings_nearby(lat, lng, radius_m, limit=500)
+    for r in raw:
+        if _row_matches_listing_filter(r, kind=kind_code or "SG", deal=deal_code or "B2"):
+            return _serialize_listing_row(r)
+    return None
+
+
 def upsert_retail_listing(data: Dict[str, Any]) -> int:
     """external_ref 가 있으면 동일 키 행을 갱신, 없으면 삽입."""
     title = (data.get("title") or "").strip()
@@ -323,6 +368,8 @@ def upsert_retail_listing(data: Dict[str, Any]) -> int:
     meta = data.get("meta") or {}
     meta_s = json.dumps(meta, ensure_ascii=False) if meta else None
     is_act = 1 if data.get("is_active", True) else 0
+    kind_code = (data.get("kind_code") or "SG").strip() or "SG"
+    deal_code = (data.get("deal_code") or "B2").strip() or "B2"
     with get_db() as conn:
         if ext:
             row = conn.execute("SELECT id FROM retail_listings WHERE external_ref = ?", (ext,)).fetchone()
@@ -333,7 +380,8 @@ def upsert_retail_listing(data: Dict[str, Any]) -> int:
                     UPDATE retail_listings SET
                         title=?, address=?, lat=?, lng=?, floor=?, floors_total=?,
                         footprint_geojson=?, building_height_m=?, competing_pois_json=?,
-                        notes=?, meta_json=?, is_active=?, updated_at=CURRENT_TIMESTAMP
+                        notes=?, meta_json=?, is_active=?, kind_code=?, deal_code=?,
+                        updated_at=CURRENT_TIMESTAMP
                     WHERE id=?
                     """,
                     (
@@ -349,6 +397,8 @@ def upsert_retail_listing(data: Dict[str, Any]) -> int:
                         notes,
                         meta_s,
                         is_act,
+                        kind_code,
+                        deal_code,
                         rid,
                     ),
                 )
@@ -357,8 +407,9 @@ def upsert_retail_listing(data: Dict[str, Any]) -> int:
             """
             INSERT INTO retail_listings (
                 external_ref, title, address, lat, lng, floor, floors_total,
-                footprint_geojson, building_height_m, competing_pois_json, notes, meta_json, is_active
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                footprint_geojson, building_height_m, competing_pois_json, notes, meta_json, is_active,
+                kind_code, deal_code
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 ext,
@@ -374,6 +425,8 @@ def upsert_retail_listing(data: Dict[str, Any]) -> int:
                 notes,
                 meta_s,
                 is_act,
+                kind_code,
+                deal_code,
             ),
         )
         return int(cur.lastrowid)
