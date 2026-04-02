@@ -392,6 +392,8 @@ window.__nearestRetailAnchor = null;
 
 /** 2단계: 1차 Top5 권역 → 건물(후보) 입지 Top5 */
 let stage2MapObjects = [];
+/** 2단계 후보 1건: 맵 위 건물 상승 + 요약 패널 (CustomOverlay 1개) */
+let stage2TowerOverlay = null;
 let stage2Data = null;
 let stage2RoadviewWidget = null;
 
@@ -415,6 +417,8 @@ let stage2RclickPendingLatLng = null;
 let stage2ExpRoadviewWidget = null;
 /** 1단계 권역 중 우클릭과 너무 먼 곳에서 2단계 방지 (m) */
 const BLUEDOT_STAGE2_MAP_MAX_DIST_FROM_MACRO_M = 4500;
+/** 맵 클릭 시 가장 가까운 2단계 후보까지 이 거리(m) 이내면 건물 타워 표시 */
+const BLUEDOT_STAGE2_MAP_TOWER_PICK_M = 95;
 
 /** 카카오 coord2RegionCode — idle마다 호출 시 429. 디바운스·이동 임계·간격·백오프 */
 const KAKAO_REGION_DEBOUNCE_MS = 650;
@@ -605,6 +609,12 @@ function initMap() {
                 runNearestCommercialAt(ll.getLat(), ll.getLng());
                 return;
             }
+            hideStage2MapTower();
+            if (mouseEvent && mouseEvent.latLng && stage2Data && Array.isArray(stage2Data.top_buildings) && stage2Data.top_buildings.length) {
+                const ll = mouseEvent.latLng;
+                const j = findNearestStage2CandidateIndex(ll.getLat(), ll.getLng(), BLUEDOT_STAGE2_MAP_TOWER_PICK_M);
+                if (j != null) window.showStage2MapTower(j);
+            }
             infoWindows.forEach(iw => iw.setMap(null));
         });
     });
@@ -624,7 +634,10 @@ function displayCenterInfo(result, status) {
 window.addEventListener('load', () => {
     try {
         document.addEventListener('keydown', (ev) => {
-            if (ev.key === 'Escape') hideStage2RclickMenu();
+            if (ev.key === 'Escape') {
+                hideStage2RclickMenu();
+                hideStage2MapTower();
+            }
         }, true);
     } catch (_) { /* ignore */ }
     try {
@@ -1304,6 +1317,7 @@ window.openStage2BuildingExperience = function (idx) {
     const expBody = document.getElementById('stage2-exp-body');
     const titleEl = document.getElementById('stage2-exp-title');
     if (!modal || !rvContainer || !expBody) return;
+    hideStage2MapTower();
     closeStage2CandidateModal();
     closeStage2RoadviewModal();
     const lines = stage2CardTitleLines(c);
@@ -1351,7 +1365,145 @@ window.openStage2RoadviewFromDetailIdx = function () {
     if (x) openStage2RoadviewForCandidate(x.lat, x.lng);
 };
 
+/**
+ * 8층 건물 시각화: 추천 층 + 경쟁(추정) 층 배치. 실제 층별 임차 데이터가 없어 후보·경쟁 수로 결정론적으로 배치.
+ */
+function assignStage2BuildingFloors(c, idx) {
+    const total = 8;
+    const rank = Number(c.stage2_rank) || (idx + 1);
+    const recTable = { 1: 4, 2: 3, 3: 5, 4: 6, 5: 4 };
+    let recommended = recTable[Math.min(Math.max(rank, 1), 5)] || 4;
+    const lat = Number(c.lat);
+    const lng = Number(c.lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        const nudge = (Math.floor(Math.abs(Math.sin(lat * 991 + lng * 877) * 100)) % 3) - 1;
+        recommended = Math.min(7, Math.max(2, recommended + nudge));
+    }
+    const compRaw = Number(c.competitor_count);
+    let nRivalFloors = Number.isFinite(compRaw) ? Math.min(6, Math.max(1, Math.ceil(Math.min(compRaw, 18) / 3))) : 2;
+    const rivals = new Set();
+    const pool = [];
+    for (let f = 1; f <= total; f++) if (f !== recommended) pool.push(f);
+    let seed = idx * 17 + rank * 5;
+    while (rivals.size < nRivalFloors && pool.length) {
+        const pi = seed % pool.length;
+        rivals.add(pool[pi]);
+        pool.splice(pi, 1);
+        seed += 7;
+    }
+    return { total, recommended, rivals };
+}
+
+function buildStage2MapTowerHtml(c, idx) {
+    const { total, recommended, rivals } = assignStage2BuildingFloors(c, idx);
+    const sc = c.scoring || {};
+    const gcol = stage2GradeColor(sc.grade);
+    const lines = stage2CardTitleLines(c);
+    let slabs = '';
+    for (let f = 1; f <= total; f++) {
+        const isRec = f === recommended;
+        const isRiv = rivals.has(f);
+        const delay = (f - 1) * 0.06;
+        const w = 44 + Math.round((f / total) * 36);
+        let mod = '';
+        let tag = '';
+        if (isRec) {
+            mod = ' s2map-rise-slab--rec';
+            tag = '<em class="s2map-rise-tag s2map-rise-tag--rec">추천</em>';
+        } else if (isRiv) {
+            mod = ' s2map-rise-slab--rival';
+            tag = '<em class="s2map-rise-tag s2map-rise-tag--rival">경쟁</em>';
+        }
+        slabs += `<div class="s2map-rise-slab${mod}" style="--rs-delay:${delay}s;--rs-w:${w}px;" role="presentation">`
+            + `<span class="s2map-rise-fl">${f}F</span>`
+            + '<span class="s2map-rise-slab-inner"></span>'
+            + tag
+            + '</div>';
+    }
+    const compLine = `${formatStage2Metric(c.competitor_count)}곳(추정)`;
+    const ancLine = `${formatStage2Metric(c.anchor_poi_count)}곳`;
+    return `
+<div class="s2map-tower-card" role="dialog" aria-label="입지 건물 시각화" onclick="event.stopPropagation();">
+    <button type="button" class="s2map-tower-x no-print" onclick="event.stopPropagation();window.hideStage2MapTower();" aria-label="닫기">✕</button>
+    <div class="s2map-tower-grid">
+        <div class="s2map-tower-scene" aria-hidden="false">
+            <div class="s2map-tower-vignette"></div>
+            <div class="s2map-tower-beam"></div>
+            <div class="s2map-rise-stack">${slabs}</div>
+            <div class="s2map-tower-ground"></div>
+        </div>
+        <div class="s2map-tower-info">
+            <div class="s2map-tower-kicker">2단계 · 맵 입지</div>
+            <div class="s2map-tower-title">${escHtml2(lines.main)}</div>
+            <p class="s2map-tower-sub">${escHtml2(lines.sub)}</p>
+            <div class="s2map-tower-scoreline" style="color:${gcol};">
+                <strong>${formatStage2Metric(sc.score)}</strong><span>/100</span>
+                <span class="s2map-tower-grade">${escHtml2(sc.grade_label_ko || '')}</span>
+            </div>
+            <ul class="s2map-tower-bullets">
+                <li>반경 내 경쟁 <b>${compLine}</b> · 앵커 <b>${ancLine}</b></li>
+                <li>추천 개원 층 <b>${recommended}F</b> · 경쟁 표시 층 <b>${rivals.size}</b>개</li>
+            </ul>
+            <p class="s2map-tower-hint">층 배치는 데이터 기반 추정 시각화입니다. 현장·호실은 로드뷰·매물로 확인하세요.</p>
+            <div class="s2map-tower-actions no-print">
+                <button type="button" class="s2map-tower-btn s2map-tower-btn--primary" onclick="event.stopPropagation();window.openStage2BuildingExperience(${idx});">로드뷰·매물·상세</button>
+            </div>
+        </div>
+    </div>
+</div>`;
+}
+
+function hideStage2MapTower() {
+    if (stage2TowerOverlay) {
+        try { stage2TowerOverlay.setMap(null); } catch (_) { /* ignore */ }
+        stage2TowerOverlay = null;
+    }
+}
+window.hideStage2MapTower = hideStage2MapTower;
+
+function findNearestStage2CandidateIndex(lat, lng, maxM) {
+    const arr = stage2Data && stage2Data.top_buildings;
+    if (!Array.isArray(arr) || !arr.length) return null;
+    let bestI = null;
+    let bestD = Infinity;
+    arr.forEach((c, i) => {
+        if (!c || c.lat == null || c.lng == null) return;
+        const d = haversineMeters(lat, lng, Number(c.lat), Number(c.lng));
+        if (d < bestD) {
+            bestD = d;
+            bestI = i;
+        }
+    });
+    if (bestI != null && bestD <= maxM) return bestI;
+    return null;
+}
+
+window.showStage2MapTower = function (idx) {
+    if (!map || typeof kakao === 'undefined' || !kakao.maps) return;
+    const arr = stage2Data && stage2Data.top_buildings;
+    const c = arr && arr[idx];
+    if (!c) return;
+    hideStage2MapTower();
+    const pos = new kakao.maps.LatLng(c.lat, c.lng);
+    const wrap = document.createElement('div');
+    wrap.className = 's2map-tower-anchor';
+    wrap.innerHTML = buildStage2MapTowerHtml(c, idx);
+    try {
+        wrap.addEventListener('click', (ev) => { ev.stopPropagation(); });
+        wrap.addEventListener('mousedown', (ev) => { ev.stopPropagation(); });
+    } catch (_) { /* ignore */ }
+    stage2TowerOverlay = new kakao.maps.CustomOverlay({
+        position: pos,
+        content: wrap,
+        yAnchor: 1,
+        zIndex: 220,
+        xAnchor: 0.5,
+    });
+    stage2TowerOverlay.setMap(map);
+};
+
 function clearStage2Markers() {
+    hideStage2MapTower();
     stage2MapObjects.forEach((o) => { try { o.setMap(null); } catch (_) { /* ignore */ } });
     stage2MapObjects = [];
 }
@@ -1389,7 +1541,7 @@ function drawStage2Markers(top) {
         const content = `<div class="stage2-pin-wrap" style="--s2col:${gcol}">
             <div class="stage2-pin-pulse"></div>
             <div class="stage2-pin-bubble">
-                <div class="stage2-pin-bubble-main" role="button" tabindex="0" onclick="window.openStage2BuildingExperience(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.openStage2BuildingExperience(${i});}">
+                <div class="stage2-pin-bubble-main" role="button" tabindex="0" onclick="event.stopPropagation();window.showStage2MapTower(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.showStage2MapTower(${i});}">
                     <strong>${safeMain}</strong>
                     <span>${safeSub}</span>
                 </div>
@@ -1635,7 +1787,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
         const macroShort = macroFull.length > 28 ? `${macroFull.slice(0, 26)}…` : macroFull;
         const locTitle = escHtml2(lines.sub);
         return `
-        <tr class="stage2-compare-tr" data-s2idx="${i}" onclick="window.openStage2BuildingExperience(${i})" title="탭하여 로드뷰·입지·매물">
+        <tr class="stage2-compare-tr" data-s2idx="${i}" onclick="window.panToStage2Candidate(${i});window.showStage2MapTower(${i});" title="탭하여 맵 건물·요약 (로드뷰는 카드 안 버튼)">
             <td class="s2c-rank"><span class="s2c-badge" style="background:${gcol}">${c.stage2_rank}</span></td>
             <td class="s2c-loc"><span class="s2c-loc-main">${escHtml2(lines.main)}</span><span class="s2c-loc-sub">${locTitle}</span></td>
             <td class="s2c-num s2c-score"><strong style="color:${gcol}">${formatStage2Metric(sc.score)}</strong><span class="s2c-denom">/100</span></td>
@@ -1644,7 +1796,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
             <td class="s2c-num">${formatStage2Metric(c.anchor_poi_count)}</td>
             <td class="s2c-macro" title="${escHtml2(macroFull || '—')}">${escHtml2(macroShort || '—')}</td>
             <td class="s2c-actions" onclick="event.stopPropagation();">
-                <button type="button" class="s2c-btn" onclick="window.openStage2BuildingExperience(${i})">보기</button>
+                <button type="button" class="s2c-btn" onclick="event.stopPropagation();window.panToStage2Candidate(${i});window.showStage2MapTower(${i});">맵</button>
                 <button type="button" class="s2c-btn s2c-btn-map" onclick="window.panToStage2Candidate(${i})">지도</button>
                 <button type="button" class="s2c-btn s2c-btn-naver" title="월세 상가·상가주택·사무실(네이버)" onclick="window.openNaverLandForStage2Candidate(${i})">월세</button>
             </td>
@@ -1671,7 +1823,7 @@ function buildStage2CompareTableHtml(top, payload, options) {
             </thead>
             <tbody>${rows}</tbody>
         </table>
-        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 <b>카카오 로드뷰 → 건물 스캔 → 입지 점수 → 네이버 월세 매물</b> 순으로 열립니다. 지도 오른쪽 <b>N</b>은 1위 좌표(또는 지도 중심) 기준입니다.</p>'}
+        ${(options && options.omitFoot) ? '' : '<p class="stage2-table-foot">행을 누르면 지도 위에 <b>8층 건물 상승·경쟁·추천 층</b>과 요약이 뜹니다. 후보 좌표 근처를 <b>맵에서 탭</b>해도 동일합니다. <b>로드뷰·매물</b>은 카드의 버튼으로 엽니다. 지도 오른쪽 <b>N</b>은 1위 좌표(또는 지도 중심) 기준입니다.</p>'}
     </div>`;
 }
 
@@ -1723,7 +1875,7 @@ function renderStage2FullReport(payload) {
         <p class="stage2-note">${meta}</p>
         ${pickExtra}
         ${focusNote}
-        <p class="stage2-note stage2-note--emphasis" style="margin-top:8px;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행을 누르면 <b>로드뷰·건물 스캔·네이버 매물</b> 화면이 열리고, 지도 말풍선과 연동됩니다.</p>
+        <p class="stage2-note stage2-note--emphasis" style="margin-top:8px;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행·말풍선·후보 근처 <b>맵 탭</b>으로 <b>8층 건물 상승·경쟁·추천 층</b> 요약이 뜨고, 카드에서 <b>로드뷰·매물</b>로 이어갈 수 있습니다.</p>
         <p class="stage2-note" style="margin-top:6px;">${escHtml2(payload.disclaimer || '')}</p>`;
     compareHost.innerHTML = buildStage2CompareTableHtml(top, payload, { light: false, omitCaption: true });
     cardBox.innerHTML = '';
