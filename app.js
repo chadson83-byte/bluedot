@@ -637,6 +637,12 @@ window.addEventListener('load', () => {
             if (ev.key === 'Escape') {
                 hideStage2RclickMenu();
                 hideStage2MapTower();
+                const ap = document.getElementById('analysis-panel');
+                if (ap) {
+                    ap.classList.remove('is-open');
+                    const t = document.getElementById('analysis-dock-toggle');
+                    if (t) t.setAttribute('aria-expanded', 'false');
+                }
             }
         }, true);
     } catch (_) { /* ignore */ }
@@ -658,6 +664,7 @@ window.addEventListener('load', () => {
             setTimeout(() => splash.style.visibility = 'hidden', 600);
         }
     }, 2000);
+    try { initAnalysisDock(); } catch (_) { /* ignore */ }
 });
 
 function zoomIn() { if (map) map.setLevel(map.getLevel() - 1); }
@@ -2076,6 +2083,13 @@ function selectDepartment(deptName, deptId) {
     document.getElementById('analysis-title-text').innerText = `${deptName} 거시 상권 분석 준비완료`;
     document.getElementById('analyze-submit-btn').style.display = 'block';
     updateAnalyzeButtonCredits();
+    syncAnalysisDockSummary();
+    const ap = document.getElementById('analysis-panel');
+    if (ap && !ap.classList.contains('hidden-mode')) {
+        ap.classList.add('is-open');
+        const btn = document.getElementById('analysis-dock-toggle');
+        if (btn) btn.setAttribute('aria-expanded', 'true');
+    }
 }
 
 const CREDITS_KEY = "bluedot_analysis_credits";
@@ -2489,7 +2503,9 @@ function renderMapAndResults(data, searchRadius) {
     if (recommendations.length === 0) {
         const msg = (data && data.message) ? data.message : '분석 결과(추천 노드)가 없습니다. 반경을 넓히거나 다른 지역을 선택해 주세요.';
         alert(msg);
-        document.getElementById('analysis-panel').classList.remove('hidden-mode');
+        const ap0 = document.getElementById('analysis-panel');
+        if (ap0) ap0.classList.remove('hidden-mode');
+        try { syncAnalysisDockSummary(); } catch (_) { /* ignore */ }
         const container = document.getElementById('results-cards-container');
         if (container) container.innerHTML = '';
         scheduleSyncStage2MapCenterCta();
@@ -2630,7 +2646,13 @@ function renderMapAndResults(data, searchRadius) {
         panMapToNode(currentAnalysisData[0].lat, currentAnalysisData[0].lng);
     }
 
-    document.getElementById('analysis-panel').classList.add('hidden-mode');
+    const apRes = document.getElementById('analysis-panel');
+    if (apRes) {
+        apRes.classList.add('hidden-mode');
+        apRes.classList.remove('is-open');
+        const tRes = document.getElementById('analysis-dock-toggle');
+        if (tRes) tRes.setAttribute('aria-expanded', 'false');
+    }
     document.getElementById('results-panel').style.display = 'block';
     setupHoverHospitalFetch();
     scheduleSyncStage2MapCenterCta();
@@ -2657,6 +2679,12 @@ async function startAnalysis() {
     if (!map) return;
     const cta = document.getElementById('stage2-map-center-cta');
     if (cta) cta.classList.remove('is-visible');
+    const apDock = document.getElementById('analysis-panel');
+    if (apDock) {
+        apDock.classList.remove('is-open');
+        const tgl = document.getElementById('analysis-dock-toggle');
+        if (tgl) tgl.setAttribute('aria-expanded', 'false');
+    }
     const center = map.getCenter();
     const radius = document.getElementById('analysis-radius').value;
 
@@ -2742,7 +2770,13 @@ async function submitAISearch() {
     
     const submitBtn = document.querySelector('.ai-submit-btn');
     submitBtn.style.opacity = "0.5"; submitBtn.style.pointerEvents = "none";
-    document.getElementById('analysis-panel').classList.add('hidden-mode');
+    const apAi = document.getElementById('analysis-panel');
+    if (apAi) {
+        apAi.classList.add('hidden-mode');
+        apAi.classList.remove('is-open');
+        const tAi = document.getElementById('analysis-dock-toggle');
+        if (tAi) tAi.setAttribute('aria-expanded', 'false');
+    }
 
     const center = map.getCenter();
     let radius = document.getElementById('analysis-radius') ? document.getElementById('analysis-radius').value : 3;
@@ -2896,13 +2930,19 @@ function teardownHoverHospitalFetch() {
 
 function closeResults() {
     document.getElementById('results-panel').style.display = 'none';
-    document.getElementById('analysis-panel').classList.remove('hidden-mode');
+    const ap = document.getElementById('analysis-panel');
+    if (ap) {
+        ap.classList.remove('hidden-mode', 'is-open');
+        const t = document.getElementById('analysis-dock-toggle');
+        if (t) t.setAttribute('aria-expanded', 'false');
+    }
     mapObjects.forEach(obj => obj.setMap(null)); mapObjects = [];
     infoWindows.forEach(iw => iw.setMap(null)); infoWindows = [];
     teardownMicroSiteUi();
     teardownStage2Ui();
     closeMicroSitePanel();
     teardownHoverHospitalFetch();
+    try { syncAnalysisDockSummary(); } catch (_) { /* ignore */ }
 }
 
 // =========================================================
@@ -3505,50 +3545,31 @@ function renderCharts(nodeData) {
     });
 }
 
-function setupBottomSheet() {
-    const sheet = document.getElementById('analysis-panel');
-    const handle = sheet.querySelector('.sheet-handle');
-    let startY, currentY;
-    let isDragging = false;
+function syncAnalysisDockSummary() {
+    const hint = document.getElementById('analysis-dock-hint');
+    if (!hint) return;
+    const r = document.getElementById('analysis-radius');
+    let rk = '반경 3km';
+    if (r && r.selectedOptions && r.selectedOptions[0]) rk = r.selectedOptions[0].text;
+    if (selectedDeptName) {
+        hint.textContent = `${selectedDeptName} · ${rk} · 탭하여 변경`;
+    } else {
+        hint.textContent = '지도를 보며 설정 · 탭하여 과목·반경';
+    }
+}
 
-    handle.addEventListener('touchstart', (e) => {
-        isDragging = true;
-        startY = e.touches[0].clientY;
-        sheet.style.transition = 'none';
-    }, {passive: true});
+window.toggleAnalysisDock = function (ev) {
+    if (ev) ev.stopPropagation();
+    const p = document.getElementById('analysis-panel');
+    if (!p || p.classList.contains('hidden-mode')) return;
+    const open = !p.classList.contains('is-open');
+    p.classList.toggle('is-open', open);
+    const btn = document.getElementById('analysis-dock-toggle');
+    if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+};
 
-    document.addEventListener('touchmove', (e) => {
-        if (!isDragging) return;
-        currentY = e.touches[0].clientY;
-        let diff = currentY - startY;
-        if (diff > 0) sheet.style.transform = `translateY(${diff}px)`;
-    }, {passive: true});
-
-    document.addEventListener('touchend', (e) => {
-        if (!isDragging) return;
-        isDragging = false;
-        sheet.style.transition = 'transform 0.3s ease';
-        let diff = currentY - startY;
-        
-        if (diff > 50) {
-            sheet.classList.remove('expanded');
-            sheet.classList.add('peek-mode');
-        } else {
-            sheet.classList.add('expanded');
-            sheet.classList.remove('peek-mode');
-        }
-        sheet.style.transform = '';
-    });
-
-    sheet.addEventListener('mouseenter', () => {
-        sheet.classList.add('expanded');
-        sheet.classList.remove('peek-mode');
-    });
-
-    sheet.addEventListener('mouseleave', () => {
-        if(!document.getElementById('payment-modal').style.display || document.getElementById('payment-modal').style.display === 'none') {
-            sheet.classList.remove('expanded');
-            sheet.classList.add('peek-mode');
-        }
-    });
+function initAnalysisDock() {
+    const el = document.getElementById('analysis-radius');
+    if (el) el.addEventListener('change', syncAnalysisDockSummary);
+    syncAnalysisDockSummary();
 }

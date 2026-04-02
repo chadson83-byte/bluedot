@@ -11,7 +11,7 @@
     
     <link rel="stylesheet" as="style" crossorigin href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
     
-    <link rel="stylesheet" href="style.css?v=retail-rise-1">
+    <link rel="stylesheet" href="style.css?v=analysis-dock-1">
     <!-- 임시: 로그인 UI 숨김(분석 비로그인 우선). 복구 시 이 style 블록만 삭제하세요. -->
     <style id="bluedot-login-paused">
         #header-login-btn, #header-user-chip { display: none !important; }
@@ -47,9 +47,9 @@
             display: grid;
             grid-template-columns: repeat(4, 1fr);
             gap: 10px;
-            max-height: 220px;
+            max-height: 200px;
             overflow-y: auto;
-            padding-bottom: 20px;
+            padding-bottom: 12px;
             margin-bottom: 10px;
         }
         .dept-grid-fixed::-webkit-scrollbar { width: 4px; }
@@ -422,11 +422,17 @@
             </div>
         </div>
 
-        <div class="bottom-sheet peek-mode" id="analysis-panel">
-            <div class="sheet-handle"></div>
-            <div class="sheet-content">
-                <div style="font-size:13px; color:var(--brand-primary); font-weight:800; text-align:center; margin-bottom:12px;" class="peek-hint">마우스를 올려 분석 과목을 선택하세요</div>
-                
+        <div class="bottom-sheet analysis-dock" id="analysis-panel">
+            <button type="button" class="analysis-dock-toggle no-print" id="analysis-dock-toggle" aria-expanded="false" aria-controls="analysis-dock-body" onclick="window.toggleAnalysisDock && window.toggleAnalysisDock(event)">
+                <span class="analysis-dock-handle" aria-hidden="true"></span>
+                <span class="analysis-dock-summary-row">
+                    <span class="analysis-dock-hint" id="analysis-dock-hint">지도를 보며 설정 · 탭하여 과목·반경</span>
+                    <span class="analysis-dock-chev" aria-hidden="true">▲</span>
+                </span>
+            </button>
+            <div class="analysis-dock-body sheet-content" id="analysis-dock-body">
+                <p class="analysis-panel-lead">과목·검색 반경을 정한 뒤 분석을 실행하세요. 창은 다시 탭하면 접힙니다.</p>
+                <p class="analysis-data-note">표시 지표는 공공 데이터와 모델 추정을 병합한 값입니다. 출처·한계는 정밀 리포트·각주를 확인하세요.</p>
                 <div class="dept-grid-fixed">
                     <div class="dept-item dept-1" onclick="selectDepartment('내과', 1)"><div class="dept-icon">🩺</div><div class="dept-label">내과</div></div>
                     <div class="dept-item dept-2" onclick="selectDepartment('피부과', 2)"><div class="dept-icon">✨</div><div class="dept-label">피부과</div></div>

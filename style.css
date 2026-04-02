@@ -88,17 +88,20 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
    ========================================================= */
 .ai-search-box {
     position: absolute;
-    top: calc(var(--topbar-height) + 16px);
+    top: calc(var(--topbar-height) + 12px);
     left: 50%;
     transform: translateX(-50%);
-    width: 90%;
-    max-width: 400px;
-    background: white;
-    border-radius: 16px;
-    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+    width: min(90%, 380px);
+    max-width: 380px;
+    background: rgba(255, 255, 255, 0.96);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border-radius: 14px;
+    box-shadow: 0 6px 22px rgba(15, 23, 42, 0.1);
+    border: 1px solid rgba(15, 23, 42, 0.06);
     display: flex;
     align-items: center;
-    padding: 10px 16px;
+    padding: 8px 14px;
     z-index: 90;
     border: 2px solid transparent;
     transition: all 0.3s ease;
@@ -198,44 +201,145 @@ body, html { font-family: 'Pretendard', sans-serif; background: var(--bg-main); 
 .my-loc-btn svg { width: 20px; height: 20px; stroke: var(--brand-deep); fill: none; stroke-width: 2.2; }
 
 /* =========================================================
-   [6] 🚀 하단 분석 패널 (Hover Peek Mode)
+   [6] 하단 분석 패널 — 접힌 독(한 줄) + 탭 시 펼침 (지도 중첩 최소화)
    ========================================================= */
-.bottom-sheet { 
-    position: absolute; bottom: 0; left: 0; width: 100%; z-index: 80; 
-    background: var(--bg-main); border-radius: var(--radius-xl) var(--radius-xl) 0 0; 
-    box-shadow: 0 -15px 40px rgba(0,0,0,0.15); 
-    padding-bottom: env(safe-area-inset-bottom, 20px); 
-    transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1); 
+.bottom-sheet {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    z-index: 80;
+    background: transparent;
+    padding-bottom: env(safe-area-inset-bottom, 12px);
+    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    pointer-events: none;
 }
 
-/* 🚀 NEW: Hover/Peek 애니메이션 로직 */
-/* 기본 상태: 절반만 보이고 살짝 내려가 있음 */
-.bottom-sheet.peek-mode {
-    transform: translateY(60%); /* 패널 높이의 60%를 아래로 숨김 */
+.bottom-sheet.analysis-dock > * {
+    pointer-events: auto;
 }
-/* 마우스를 올리거나 터치하면 전체가 올라옴 */
-.bottom-sheet.peek-mode:hover, .bottom-sheet.peek-mode:active {
-    transform: translateY(0);
-}
-/* 분석을 시작하거나 결과가 나왔을 때는 완전히 숨김 */
+
 .bottom-sheet.hidden-mode {
     transform: translateY(120%) !important;
+    pointer-events: none !important;
 }
 
-.sheet-handle { width: 40px; height: 5px; background: #E5E7EB; border-radius: 3px; margin: 14px auto 10px; }
-
-/* 🔥 가림 현상 해결 핵심 코드: padding-bottom을 140px로 늘리고, 스크롤바(overflow-y) 활성화 */
-.sheet-content { 
-    width: 100%; 
-    max-width: 600px; 
-    margin: 0 auto; 
-    padding: 0 24px 140px 24px; 
-    overflow-y: auto; 
-    max-height: 75vh; 
+/* 접힘: 상단 토글 바만 보임 (지도 대부분 유지) */
+.analysis-dock-toggle {
+    width: 100%;
+    max-width: 600px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px 12px;
+    background: rgba(255, 255, 255, 0.97);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-bottom: none;
+    border-radius: 18px 18px 0 0;
+    box-shadow: 0 -6px 28px rgba(15, 23, 42, 0.1);
+    cursor: pointer;
+    font-family: inherit;
+    -webkit-tap-highlight-color: transparent;
 }
 
-.peek-hint { transition: opacity 0.3s; opacity: 1; }
-.bottom-sheet.peek-mode:hover .peek-hint { opacity: 0; display: none;} /* 올라오면 힌트 텍스트 숨김 */
+.analysis-dock-toggle:active {
+    background: #f8fafc;
+}
+
+.analysis-dock-handle {
+    width: 36px;
+    height: 5px;
+    background: #cbd5e1;
+    border-radius: 99px;
+}
+
+.analysis-dock-summary-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    width: 100%;
+}
+
+.analysis-dock-hint {
+    flex: 1;
+    text-align: left;
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--brand-primary);
+    letter-spacing: -0.02em;
+    line-height: 1.35;
+}
+
+.analysis-dock-chev {
+    flex-shrink: 0;
+    font-size: 11px;
+    color: #64748b;
+    font-weight: 900;
+    transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.bottom-sheet.analysis-dock.is-open .analysis-dock-chev {
+    transform: rotate(180deg);
+}
+
+/* 펼침 본문 */
+.analysis-dock-body {
+    width: 100%;
+    max-width: 600px;
+    margin: 0 auto;
+    background: var(--bg-main);
+    border-radius: 0;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-top: 1px solid #e2e8f0;
+    box-shadow: 0 -4px 24px rgba(15, 23, 42, 0.08);
+    overflow: hidden;
+    max-height: 0;
+    opacity: 0;
+    padding: 0 24px;
+    transition:
+        max-height 0.4s cubic-bezier(0.16, 1, 0.3, 1),
+        opacity 0.25s ease,
+        padding 0.35s ease;
+}
+
+.bottom-sheet.analysis-dock.is-open .analysis-dock-body {
+    max-height: min(68vh, 560px);
+    opacity: 1;
+    padding: 12px 24px 28px;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.analysis-panel-lead {
+    font-size: 12px;
+    font-weight: 700;
+    color: #475569;
+    line-height: 1.45;
+    margin: 0 0 8px;
+}
+
+.analysis-data-note {
+    font-size: 10px;
+    font-weight: 600;
+    color: #94a3b8;
+    line-height: 1.4;
+    margin: 0 0 14px;
+    padding: 8px 10px;
+    border-radius: 10px;
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+}
+
+.sheet-content {
+    width: 100%;
+    max-width: 600px;
+    margin: 0 auto;
+}
 
 .dept-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 24px; }
 @media screen and (max-width: 380px) { .dept-grid { grid-template-columns: repeat(3, 1fr); } }
