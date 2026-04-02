@@ -94,6 +94,10 @@ def api_health():
             "active_count": db.count_retail_listings_active(),
             "ingest_key_configured": bool((os.getenv("LISTINGS_INGEST_KEY") or "").strip()),
         },
+        "sqlite": {
+            "db_file": os.path.basename(getattr(db, "DB_PATH", "bluedot.db")),
+            "fly_volume_style_path": str(getattr(db, "DB_PATH", "")).startswith("/data/"),
+        },
     }
 
 

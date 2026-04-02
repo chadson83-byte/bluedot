@@ -9,11 +9,23 @@ from contextlib import contextmanager
 from typing import Any, Dict, List
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(_BASE, "bluedot.db")
+_DEFAULT_DB_FILE = os.path.join(_BASE, "bluedot.db")
+# Fly Volume 등: BLUEDOT_DB_PATH=/data/bluedot.db (fly.toml [env] + [[mounts]])
+DB_PATH = (os.environ.get("BLUEDOT_DB_PATH") or "").strip() or _DEFAULT_DB_FILE
+
+
+def _ensure_db_parent_dir() -> None:
+    parent = os.path.dirname(os.path.abspath(DB_PATH))
+    if parent:
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError:
+            pass
 
 
 @contextmanager
 def get_db():
+    _ensure_db_parent_dir()
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     try:
@@ -24,6 +36,7 @@ def get_db():
 
 
 def init_db():
+    _ensure_db_parent_dir()
     with get_db() as conn:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS users (

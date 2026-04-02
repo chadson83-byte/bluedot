@@ -2,6 +2,11 @@
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
+# SQLite 영구 저장: Volume 이름 bluedot_data 를 먼저 만든 뒤 배포하세요.
+#   fly volumes create bluedot_data --region nrt --size 3
+#   fly scale count 1
+#   fly deploy
+# (Volume은 Machine 1대에만 붙습니다. SQLite는 replica 1 권장.)
 
 app = 'bluedot-backend-autumn-grass-4638'
 primary_region = 'nrt'
@@ -11,6 +16,11 @@ primary_region = 'nrt'
 
 [env]
   BLUEDOT_TEST_MODE = '0'
+  BLUEDOT_DB_PATH = '/data/bluedot.db'
+
+[[mounts]]
+  source = 'bluedot_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
