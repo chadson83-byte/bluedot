@@ -2494,6 +2494,23 @@ function renderMapAndResults(data, searchRadius) {
     teardownMicroSiteUi();
     teardownStage2Ui();
     teardownHoverHospitalFetch();
+    window.lastAnalysisDataReliability = null;
+    try { updateAnalysisReliabilityUi(); } catch (_) { /* ignore */ }
+    if (data && data.status === 'insufficient_data') {
+        window.lastAnalysisDataReliability = data.data_reliability || null;
+        try { updateAnalysisReliabilityUi(); } catch (_) { /* ignore */ }
+        const msg = data.message || '지금은 신뢰할 수 있는 분석 데이터를 준비하기 어렵습니다. 잠시 후 다시 시도해 주세요.';
+        alert(msg);
+        const ap = document.getElementById('analysis-panel');
+        if (ap) ap.classList.remove('hidden-mode');
+        try { syncAnalysisDockSummary(); } catch (_) { /* ignore */ }
+        const container = document.getElementById('results-cards-container');
+        if (container) container.innerHTML = '';
+        currentAnalysisData = [];
+        currentHospitals = [];
+        scheduleSyncStage2MapCenterCta();
+        return;
+    }
     const recommendations = Array.isArray(data && data.recommendations) ? data.recommendations : [];
     const hospitals = Array.isArray(data && data.hospitals) ? data.hospitals : [];
     currentAnalysisData = recommendations;
@@ -2511,6 +2528,9 @@ function renderMapAndResults(data, searchRadius) {
         scheduleSyncStage2MapCenterCta();
         return;
     }
+
+    window.lastAnalysisDataReliability = (data && data.data_reliability) ? data.data_reliability : null;
+    try { updateAnalysisReliabilityUi(); } catch (_) { /* ignore */ }
 
     // BLUEDOT 로고 스타일: 어두운 파란 안쪽 원 + 반투명 밝은 파란 바깥 원
     const BLUEDOT_HTML = '<div class="bluedot-dot" style="width:26px;height:26px;border-radius:50%;background:rgba(59,130,246,0.4);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,0.2);border:2px solid white;"><div style="width:12px;height:12px;border-radius:50%;background:#0f172a;"></div></div>';
@@ -2536,7 +2556,7 @@ function renderMapAndResults(data, searchRadius) {
                 : '';
             const ds = hospital.data_source || 'hira';
             let sourceFoot = '※ 심평원·공공데이터 기반';
-            if (ds === 'estimate_hira_unreachable') sourceFoot = '※ 심평원 미연결·오류 시 참고용 추정치 (실제 기관 좌표 아님)';
+            if (ds === 'estimate_hira_unreachable') sourceFoot = '※ 심평원 미수신 시 표시되는 참고용 추정(좌표·규모는 재현 가능한 모형값, 실제 기관 아님)';
             else if (ds === 'hira_nearby_all_types' || ds === 'hira_nearby_cl31') sourceFoot = '※ 반경 내 의료기관(선택 과목 필터 완화·다른 진료과 포함 가능)';
 
             const infoContent = `
@@ -2734,6 +2754,10 @@ async function startAnalysis() {
             document.getElementById('analysis-panel').classList.remove('hidden-mode');
             return;
         }
+        if (data.status === 'insufficient_data') {
+            renderMapAndResults(data, radius);
+            return;
+        }
         renderMapAndResults(data, radius);
     } catch (error) {
         alert(bluedotNetworkErrorMessage(error));
@@ -2798,6 +2822,10 @@ async function submitAISearch() {
         if (data.status === 'error') {
             alert(data.message);
             document.getElementById('analysis-panel').classList.remove('hidden-mode');
+            return;
+        }
+        if (data.status === 'insufficient_data') {
+            renderMapAndResults(data, radius);
             return;
         }
         if (data.map_center && data.region_filtered && map) {
@@ -3545,6 +3573,15 @@ function renderCharts(nodeData) {
     });
 }
 
+function updateAnalysisReliabilityUi() {
+    const el = document.getElementById('analysis-reliability-line');
+    if (!el) return;
+    const dr = window.lastAnalysisDataReliability;
+    const t = dr && dr.summary_ko ? String(dr.summary_ko) : '';
+    el.textContent = t;
+    el.style.display = t ? 'block' : 'none';
+}
+
 function syncAnalysisDockSummary() {
     const hint = document.getElementById('analysis-dock-hint');
     if (!hint) return;
@@ -3572,4 +3609,5 @@ function initAnalysisDock() {
     const el = document.getElementById('analysis-radius');
     if (el) el.addEventListener('change', syncAnalysisDockSummary);
     syncAnalysisDockSummary();
+    try { updateAnalysisReliabilityUi(); } catch (_) { /* ignore */ }
 }

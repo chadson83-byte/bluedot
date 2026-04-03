@@ -3,8 +3,9 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import logging
-import random
+import hashlib
 import requests
+from requests.adapters import HTTPAdapter
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import urllib.parse
@@ -915,15 +916,42 @@ def _hospital_revenue_and_detail(
     return rev_str, detail_label, rev_man
 
 
+def _stable_u64(seed: str, salt: int = 0) -> int:
+    payload = f"{seed}\0{salt}".encode("utf-8", errors="replace")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
+def _stable_int(seed: str, salt: int, lo: int, hi: int) -> int:
+    if hi <= lo:
+        return lo
+    span = hi - lo + 1
+    return lo + (_stable_u64(seed, salt) % span)
+
+
+def _stable_unit_float(seed: str, salt: int) -> float:
+    return (_stable_u64(seed, salt) % 1_000_000) / 1_000_000.0
+
+
+def _stable_float(seed: str, salt: int, lo: float, hi: float) -> float:
+    if hi <= lo:
+        return lo
+    return lo + _stable_unit_float(seed, salt) * (hi - lo)
+
+
 def get_dummy_hospitals(lat: float, lng: float, radius: int, dept: str, count: int):
     # 🚨 바다에 수백개씩 찍히지 않도록 마커 개수 안전 제한
     safe_count = min(int(count), 15)
     dummy_list = []
-    
+    seed_base = f"{lat:.6f}|{lng:.6f}|{int(radius)}|{dept}"
+
     for i in range(safe_count):
-        doctor_count = random.randint(1, 4)
-        staff_count = random.randint(max(2, doctor_count * 2), doctor_count * 5)
-        established_years = random.randint(1, 20)
+        doctor_count = _stable_int(seed_base, i * 10 + 1, 1, 4)
+        lo_staff = max(2, doctor_count * 2)
+        hi_staff = doctor_count * 5
+        if hi_staff < lo_staff:
+            hi_staff = lo_staff
+        staff_count = _stable_int(seed_base, i * 10 + 2, lo_staff, hi_staff)
+        established_years = _stable_int(seed_base, i * 10 + 3, 1, 20)
         
         if doctor_count >= 3:
             hours_tag = "🕒 365일/야간진료 (대형)"
@@ -941,16 +969,17 @@ def get_dummy_hospitals(lat: float, lng: float, radius: int, dept: str, count: i
             staff_role_label="직원(추정)",
         )
         fact_tags = _build_fact_tags(doctor_count, hours_tag, dept)
-        raw_name = f"경쟁 {dept} (AI추정)"
+        raw_name = f"경쟁 {dept} (심평원 미수신·참고용)"
         display_name = _mask_clinic_name(raw_name, dept)
+        did = hashlib.sha256(f"{seed_base}|{i}".encode("utf-8", errors="replace")).hexdigest()[:12]
 
         h = {
-            "id": f"dummy_{i}_{random.randint(1000,9999)}",
+            "id": f"dummy_{did}_{i}",
             "name": raw_name,
             "display_name": display_name,
             "fact_tags": fact_tags,
-            "lat": lat + random.uniform(-0.005 * radius, 0.005 * radius),
-            "lng": lng + random.uniform(-0.005 * radius, 0.005 * radius),
+            "lat": lat + _stable_float(seed_base, i * 10 + 4, -0.005 * radius, 0.005 * radius),
+            "lng": lng + _stable_float(seed_base, i * 10 + 5, -0.005 * radius, 0.005 * radius),
             "doctors": doctor_count,
             "staff_count": staff_count,
             "established_years": established_years,
@@ -969,17 +998,48 @@ HIRA_HTTP_HEADERS = {
     "Accept": "application/json",
 }
 
+_HIRA_SESSION_LOCK = threading.Lock()
+_HIRA_SESSION: Optional[requests.Session] = None
+
+
+def _hira_http_session() -> requests.Session:
+    """동일 프로세스 내 HIRA 호출에 연결 풀을 씁니다(응답 본문·재시도 정책은 기존과 동일)."""
+    global _HIRA_SESSION
+    with _HIRA_SESSION_LOCK:
+        if _HIRA_SESSION is None:
+            s = requests.Session()
+            s.headers.update(HIRA_HTTP_HEADERS)
+            # urllib3 재시도는 사용하지 않음 — 아래 _hira_http_get 백오프와 중복 방지
+            adapter = HTTPAdapter(pool_connections=12, pool_maxsize=32, max_retries=0)
+            s.mount("https://", adapter)
+            s.mount("http://", adapter)
+            _HIRA_SESSION = s
+        return _HIRA_SESSION
+
+
+_HIRA_SINGLEFLIGHT_LOCKS: Dict[Tuple[float, float, int, str], threading.Lock] = {}
+_HIRA_SINGLEFLIGHT_GUARD = threading.Lock()
+
+
+def _hira_fetch_singleflight_lock(ck: Tuple[float, float, int, str]) -> threading.Lock:
+    """같은 HIRA 캐시 키에 대한 동시 fetch를 1회로 합칩니다(결과는 캐시 공유로 동일)."""
+    with _HIRA_SINGLEFLIGHT_GUARD:
+        lk = _HIRA_SINGLEFLIGHT_LOCKS.get(ck)
+        if lk is None:
+            lk = threading.Lock()
+            _HIRA_SINGLEFLIGHT_LOCKS[ck] = lk
+        return lk
+
 
 def _hira_http_get(url: str, params: dict) -> Optional[requests.Response]:
     """429·5xx·연결 오류 시 지수 백오프로 재시도. 마지막 응답(실패 포함) 또는 None."""
     backoff = (0.35, 0.9, 1.8, 3.2, 5.0)
     timeout = _hira_http_timeout_seconds()
     last: Optional[requests.Response] = None
+    sess = _hira_http_session()
     for attempt in range(len(backoff) + 1):
         try:
-            r = requests.get(
-                url, params=params, timeout=timeout, headers=HIRA_HTTP_HEADERS
-            )
+            r = sess.get(url, params=params, timeout=timeout)
             last = r
             if r.status_code == 200:
                 return r
@@ -1054,7 +1114,7 @@ def _hira_fetch_hospitals_once(
 
     real_hospitals: list = []
     total_doctors_in_radius = 0
-    for item in items:
+    for idx, item in enumerate(items):
         doctor_count = int(item.get("drTotCnt", 1))
         total_doctors_in_radius += doctor_count
 
@@ -1111,8 +1171,11 @@ def _hira_fetch_hospitals_once(
         if staff_count is not None and doctor_count > 0:
             npd = round(float(staff_count) / float(doctor_count), 2)
 
+        _fallback_id = "hira_" + hashlib.sha256(
+            f"{item.get('addr', '')}|{item.get('yadmNm', '')}|{idx}".encode("utf-8", errors="replace")
+        ).hexdigest()[:16]
         h = {
-            "id": item.get("ykiho", str(random.randint(1000, 9999))),
+            "id": item.get("ykiho") or _fallback_id,
             "name": raw_name,
             "display_name": display_name,
             "fact_tags": fact_tags,
@@ -1403,70 +1466,78 @@ def fetch_real_hospitals(lat: float, lng: float, radius: int, dept: str):
     if cached is not None:
         return cached
 
-    if not (os.getenv("HIRA_API_KEY") or "").strip():
-        logging.warning(
-            "HIRA_API_KEY 미설정 — 코드 내장 폴백 키로 호출합니다. "
-            "운영(Fly)에서는 fly secrets set HIRA_API_KEY=... 권장."
+    with _hira_fetch_singleflight_lock(ck):
+        cached = _hira_cache_get(ck)
+        if cached is not None:
+            return cached
+
+        if not (os.getenv("HIRA_API_KEY") or "").strip():
+            logging.warning(
+                "HIRA_API_KEY 미설정 — 코드 내장 폴백 키로 호출합니다. "
+                "운영(Fly)에서는 fly secrets set HIRA_API_KEY=... 권장."
+            )
+
+        merged = _hira_fetch_merged_inner(lat, lng, int(radius), dept)
+        if merged:
+            _hira_cache_set(ck, merged)
+            return merged
+
+        expand_ok = os.getenv("BLUEDOT_HIRA_EXPAND_RADIUS_RETRY", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
         )
+        r_user = int(radius)
+        r2 = min(r_user * 2, 10)
+        if expand_ok and r2 > r_user:
+            merged_wide = _hira_fetch_merged_inner(lat, lng, r2, dept)
+            if merged_wide and merged_wide[0]:
+                filtered = _filter_hospitals_within_km(merged_wide[0], lat, lng, float(r_user))
+                if filtered:
+                    tot = sum(int(h.get("doctors") or 1) for h in filtered)
+                    tup = (filtered, tot)
+                    logging.info(
+                        "HIRA 반경 확대(%skm) 후 %skm 이내 필터 (dept=%s, n=%d)",
+                        r2,
+                        r_user,
+                        dept,
+                        len(filtered),
+                    )
+                    _hira_cache_set(ck, tup)
+                    return tup
 
-    merged = _hira_fetch_merged_inner(lat, lng, int(radius), dept)
-    if merged:
-        _hira_cache_set(ck, merged)
-        return merged
+        stale = _hira_last_good_read(ck)
+        if stale and stale[0]:
+            lst, tot = stale
+            out: list = []
+            for h in lst:
+                nh = dict(h)
+                pfx = nh.get("data_source") or "hira"
+                nh["data_source"] = f"{pfx}_stale_snapshot"
+                out.append(nh)
+            logging.warning(
+                "HIRA 실패·0건 — 직전 성공 스냅샷 %d건 반환(보관 %.0f시간)",
+                len(out),
+                _hira_stale_fallback_ttl_seconds() / 3600.0,
+            )
+            return out, tot
 
-    expand_ok = os.getenv("BLUEDOT_HIRA_EXPAND_RADIUS_RETRY", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-    )
-    r_user = int(radius)
-    r2 = min(r_user * 2, 10)
-    if expand_ok and r2 > r_user:
-        merged_wide = _hira_fetch_merged_inner(lat, lng, r2, dept)
-        if merged_wide and merged_wide[0]:
-            filtered = _filter_hospitals_within_km(merged_wide[0], lat, lng, float(r_user))
-            if filtered:
-                tot = sum(int(h.get("doctors") or 1) for h in filtered)
-                tup = (filtered, tot)
-                logging.info(
-                    "HIRA 반경 확대(%skm) 후 %skm 이내 필터 (dept=%s, n=%d)",
-                    r2,
-                    r_user,
-                    dept,
-                    len(filtered),
-                )
-                _hira_cache_set(ck, tup)
-                return tup
-
-    stale = _hira_last_good_read(ck)
-    if stale and stale[0]:
-        lst, tot = stale
-        out: list = []
-        for h in lst:
-            nh = dict(h)
-            pfx = nh.get("data_source") or "hira"
-            nh["data_source"] = f"{pfx}_stale_snapshot"
-            out.append(nh)
+        dummies = get_dummy_hospitals(lat, lng, radius, dept, 10)
+        for h in dummies:
+            h["data_source"] = "estimate_hira_unreachable"
+        tot = sum(int(h.get("doctors") or 1) for h in dummies)
         logging.warning(
-            "HIRA 실패·0건 — 직전 성공 스냅샷 %d건 반환(보관 %.0f시간)",
-            len(out),
-            _hira_stale_fallback_ttl_seconds() / 3600.0,
+            "HIRA 사용 불가·빈 결과 — 추정 경쟁 마커 %d건 반환 (실제 심평원 연동 시 교체됨)",
+            len(dummies),
         )
-        return out, tot
+        return dummies, tot
 
-    dummies = get_dummy_hospitals(lat, lng, radius, dept, 10)
-    for h in dummies:
-        h["data_source"] = "estimate_hira_unreachable"
-    tot = sum(int(h.get("doctors") or 1) for h in dummies)
-    logging.warning(
-        "HIRA 사용 불가·빈 결과 — 추정 경쟁 마커 %d건 반환 (실제 심평원 연동 시 교체됨)",
-        len(dummies),
-    )
-    return dummies, tot
 
-def fetch_demographics_and_revenue(radius: int):
-    base_pop = random.randint(25000, 60000) * (radius ** 1.5)
-    avg_revenue = random.randint(8000, 15000)
+def fetch_demographics_and_revenue(radius: int, seed: str = "default"):
+    """레거시 노드 분석용. 동일 seed·반경이면 항상 같은 값(재현 가능)."""
+    s = f"demo_rev|{seed}|{int(radius)}"
+    base_pop = _stable_int(s, 1, 25000, 60000) * (radius ** 1.5)
+    avg_revenue = _stable_int(s, 2, 8000, 15000)
     return int(base_pop), avg_revenue
 
 # =========================================================
@@ -1476,7 +1547,8 @@ def analyze_node(node_name: str, lat: float, lng: float, dept: str, radius: int)
     real_hospitals, total_doctors = fetch_real_hospitals(lat, lng, radius, dept)
     clinic_count = len(real_hospitals)
     competition_capacity = max(1, total_doctors)
-    population, avg_revenue = fetch_demographics_and_revenue(radius)
+    seed = f"{node_name}|{lat:.6f}|{lng:.6f}|{dept}|{int(radius)}"
+    population, avg_revenue = fetch_demographics_and_revenue(radius, seed=seed)
     
     pop_in_10k = population / 10000
     clinics_per_10k = clinic_count / pop_in_10k if pop_in_10k > 0 else 0
@@ -1512,19 +1584,25 @@ def analyze_node(node_name: str, lat: float, lng: float, dept: str, radius: int)
     comp_text = f"{comp_level} (기관 {clinic_count}개 / 전문의 {int(competition_capacity)}명)"
 
     if dept in ["소아과", "치과"]:
-        age_score = min(30.0, (random.uniform(0.15, 0.3) / 0.25) * 30)
+        u = _stable_float(seed, 101, 0.15, 0.3)
+        age_score = min(30.0, (u / 0.25) * 30)
     elif dept in ["피부과", "정신건강의학과", "산부인과"]:
-        age_score = min(30.0, (random.uniform(0.4, 0.6) / 0.5) * 30)
+        u = _stable_float(seed, 102, 0.4, 0.6)
+        age_score = min(30.0, (u / 0.5) * 30)
     else:
-        age_score = min(30.0, (random.uniform(0.2, 0.4) / 0.3) * 30)
+        u = _stable_float(seed, 103, 0.2, 0.4)
+        age_score = min(30.0, (u / 0.3) * 30)
 
-    anchor_score = 15.0 if random.choice([True, False]) else random.uniform(3.0, 8.0)
+    anchor_score = (
+        15.0 if (_stable_u64(seed, 104) % 2 == 0) else _stable_float(seed, 105, 3.0, 8.0)
+    )
     revenue_score = min(35.0, (avg_revenue / 15000) * 35)
-    risk_penalty = random.uniform(2.0, 15.0)
+    risk_penalty = _stable_float(seed, 106, 2.0, 15.0)
 
     total_raw_score = age_score + anchor_score + revenue_score - risk_penalty - comp_penalty
-    raw_final = max(4.0, min(9.9, ((total_raw_score + 50) / 100) * 10)) 
-    final_score = min(raw_final, random.uniform(5.5, 6.8)) if is_red_ocean else raw_final
+    raw_final = max(4.0, min(9.9, ((total_raw_score + 50) / 100) * 10))
+    red_cap = _stable_float(seed, 107, 5.5, 6.8)
+    final_score = min(raw_final, red_cap) if is_red_ocean else raw_final
 
     f_age = round(age_score, 1)
     f_rev = round(revenue_score, 1)
@@ -1871,6 +1949,11 @@ def _hospitals_cache_set(key: Tuple[Any, ...], payload: Dict[str, Any]) -> None:
                 break
 
 
+def _hospitals_cache_delete(key: Tuple[Any, ...]) -> None:
+    with _HOSPITALS_ANALYSIS_CACHE_LOCK:
+        _HOSPITALS_ANALYSIS_CACHE.pop(key, None)
+
+
 def _nearby_cache_key(lat: float, lng: float, dept: str, radius: int) -> Tuple[Any, ...]:
     return (round(float(lat), 3), round(float(lng), 3), str(dept or "").strip(), int(radius))
 
@@ -2146,6 +2229,101 @@ def api_building_aging(lat: float, lng: float, dept: str = "한의원", radius_k
 
 # 상위 N개 노드: HIRA 병렬 처리(건물 노후화는 /api/building-aging 에서만). 워커 수는 BLUEDOT_ANALYZE_HIRA_WORKERS
 
+BLUEDOT_INSUFFICIENT_DATA_MSG_KO = (
+    "지금은 충분한 데이터 수집이 어려운 상태입니다. "
+    "신뢰할 수 있는 분석 결과를 제공하기 어려우니, 잠시 후 다시 분석해 주세요."
+)
+
+
+def _dedupe_hospital_payload_list(lst: List[dict]) -> List[dict]:
+    seen: set = set()
+    out: List[dict] = []
+    for h in lst or []:
+        if not isinstance(h, dict):
+            continue
+        key = str(h.get("id") or "").strip()
+        if not key:
+            key = f"{h.get('lat')}|{h.get('lng')}|{h.get('name')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
+
+
+def _build_data_reliability_summary(
+    hospitals: List[dict],
+    *,
+    phase2_meta: Optional[dict] = None,
+) -> dict:
+    counts: Dict[str, int] = {}
+    for h in hospitals or []:
+        ds = str(h.get("data_source") or "hira")
+        counts[ds] = counts.get(ds, 0) + 1
+    n = sum(counts.values())
+    synthetic_n = sum(c for k, c in counts.items() if "estimate_hira_unreachable" in k)
+    stale_n = sum(c for k, c in counts.items() if "_stale_snapshot" in k)
+    relaxed_n = sum(
+        c for k, c in counts.items() if k in ("hira_nearby_all_types", "hira_nearby_cl31")
+    )
+    if synthetic_n > 0:
+        tier = "low"
+    elif stale_n > 0:
+        tier = "medium"
+    elif relaxed_n > 0 or len(counts) > 1:
+        tier = "medium"
+    else:
+        tier = "high"
+    tier_ko = {
+        "high": "높음(심평원·마스터 중심)",
+        "medium": "보통(완화·스냅샷·혼합 가능)",
+        "low": "제한적(추정 마커 포함)",
+    }.get(tier, tier)
+    if n == 0:
+        summary_ko = "지도에 표시할 경쟁 마커가 없습니다."
+    else:
+        summary_ko = (
+            f"데이터 신뢰 {tier_ko}. 지도 마커 {n}건 — "
+            f"심평원 미수신 추정 {synthetic_n}건, 직전 스냅샷 {stale_n}건, 필터 완화 {relaxed_n}건."
+        )
+    p2_fb = bool((phase2_meta or {}).get("used_fallback"))
+    if p2_fb and n:
+        summary_ko += " 도보권은 네트워크 폴백으로 근사했습니다."
+    return {
+        "tier": tier,
+        "marker_total": n,
+        "by_source": counts,
+        "synthetic_placeholder_count": synthetic_n,
+        "stale_snapshot_count": stale_n,
+        "relaxed_filter_count": relaxed_n,
+        "phase2_used_fallback": p2_fb,
+        "summary_ko": summary_ko,
+    }
+
+
+def _analysis_data_trustworthy_for_display(dr: Optional[dict], dept: str) -> bool:
+    """심평원 추정(더미) 마커가 섞이면 메인 분석 결과로는 제공하지 않는다."""
+    if (dept or "").strip() == "동물병원":
+        return True
+    if not dr or not isinstance(dr, dict):
+        return False
+    if dr.get("tier") == "low":
+        return False
+    if int(dr.get("synthetic_placeholder_count") or 0) > 0:
+        return False
+    return True
+
+
+def _insufficient_data_payload(dr: Optional[dict]) -> Dict[str, Any]:
+    return {
+        "status": "insufficient_data",
+        "message": BLUEDOT_INSUFFICIENT_DATA_MSG_KO,
+        "code": "UNRELIABLE_COMPETITOR_DATA",
+        "data_reliability": dr,
+        "recommendations": [],
+        "hospitals": [],
+    }
+
 
 @app.get("/api/hospitals")
 def get_analysis_data(
@@ -2163,6 +2341,16 @@ def get_analysis_data(
         if cached is not None:
             cached = dict(cached)
             cached["cached"] = True
+            if cached.get("status") == "success":
+                if "data_reliability" not in cached:
+                    hlist = _dedupe_hospital_payload_list(cached.get("hospitals") or [])
+                    cached["hospitals"] = hlist
+                    cached["data_reliability"] = _build_data_reliability_summary(
+                        hlist, phase2_meta=cached.get("phase2")
+                    )
+                if not _analysis_data_trustworthy_for_display(cached.get("data_reliability"), dept):
+                    _hospitals_cache_delete(ck0)
+                    return _insufficient_data_payload(cached.get("data_reliability"))
             return cached
 
     analyzed_nodes = []
@@ -2387,6 +2575,8 @@ def get_analysis_data(
                 all_hospitals.extend(_rh)
                 analyzed_nodes.append(_node_h)
 
+            all_hospitals = _dedupe_hospital_payload_list(all_hospitals)
+
             # CSV 데이터가 정상 처리되었으면 즉시 반환!
             ranked_nodes = sorted(analyzed_nodes, key=lambda x: x["score_val"], reverse=True)
             for index, n in enumerate(ranked_nodes):
@@ -2398,7 +2588,12 @@ def get_analysis_data(
                 "hospitals": all_hospitals,
                 "recommendations": ranked_nodes,
                 "phase2": phase2_meta,
+                "data_reliability": _build_data_reliability_summary(
+                    all_hospitals, phase2_meta=phase2_meta
+                ),
             }
+            if not _analysis_data_trustworthy_for_display(payload.get("data_reliability"), dept):
+                return _insufficient_data_payload(payload.get("data_reliability"))
             if not nocache:
                 _hospitals_cache_set(_hospitals_analysis_cache_key(lat, lng, dept, radius, walk_minutes), payload)
             return payload
@@ -2741,16 +2936,24 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
             del node["score_val"]
         recommendations.append(node)
 
+    all_hospitals = _dedupe_hospital_payload_list(all_hospitals)
+    _dr_final = _build_data_reliability_summary(
+        all_hospitals, phase2_meta=phase2_meta if "phase2_meta" in locals() else None
+    )
+    if not _analysis_data_trustworthy_for_display(_dr_final, dept_name):
+        return _insufficient_data_payload(_dr_final)
+
     return {
         "status": "success",
         "department": f"{dept_name} (맞춤 컨설팅 완료)",
         "search_radius": radius,
         "hospitals": all_hospitals,
         "recommendations": recommendations,
-        "phase2": phase2_meta if 'phase2_meta' in locals() else None,
+        "phase2": phase2_meta if "phase2_meta" in locals() else None,
+        "data_reliability": _dr_final,
         "map_center": map_center,
         "region_filtered": use_region_filter,
-        "region_name": region_display if use_region_filter else None
+        "region_name": region_display if use_region_filter else None,
     }
 
 # =========================================================
