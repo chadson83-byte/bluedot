@@ -99,8 +99,110 @@ def init_db():
                 WHERE external_ref IS NOT NULL AND length(trim(external_ref)) > 0;
             CREATE INDEX IF NOT EXISTS idx_retail_listings_lat_lng ON retail_listings(lat, lng);
             CREATE INDEX IF NOT EXISTS idx_retail_listings_active ON retail_listings(is_active);
+
+            CREATE TABLE IF NOT EXISTS sns_floating_population (
+                data_strd_ym TEXT NOT NULL,
+                pnu TEXT NOT NULL,
+                legaldong_cd TEXT NOT NULL,
+                induty_cd TEXT NOT NULL,
+                fpop_scor REAL NOT NULL,
+                clsf_no INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (pnu, induty_cd, clsf_no, data_strd_ym)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sns_fp_ldong ON sns_floating_population(legaldong_cd);
+            CREATE INDEX IF NOT EXISTS idx_sns_fp_ym ON sns_floating_population(data_strd_ym);
+            CREATE INDEX IF NOT EXISTS idx_sns_fp_induty ON sns_floating_population(induty_cd);
+
+            CREATE TABLE IF NOT EXISTS subway_station_footfall (
+                data_strd_ym TEXT NOT NULL,
+                subway_scn_innb TEXT NOT NULL,
+                subway_scn_nm TEXT NOT NULL,
+                subway_route_nm TEXT,
+                center_lat REAL NOT NULL,
+                center_lng REAL NOT NULL,
+                totl_fpop REAL NOT NULL,
+                male_fpop REAL NOT NULL,
+                female_fpop REAL NOT NULL,
+                PRIMARY KEY (subway_scn_innb, data_strd_ym)
+            );
+            CREATE INDEX IF NOT EXISTS idx_subway_fp_ym ON subway_station_footfall(data_strd_ym);
+            CREATE INDEX IF NOT EXISTS idx_subway_fp_lat_lng ON subway_station_footfall(center_lat, center_lng);
+
+            CREATE TABLE IF NOT EXISTS commercial_vitality_road (
+                strd_yr TEXT NOT NULL,
+                ctpr_nm TEXT NOT NULL,
+                signgu_nm TEXT NOT NULL,
+                rdnmadr TEXT NOT NULL,
+                strt_smrd_clsf TEXT NOT NULL DEFAULT '',
+                bsnes_inde_cnt REAL,
+                prvyy_bsnes_cnt REAL,
+                bsnes_cnt REAL,
+                idx_induty_1 REAL,
+                idx_induty_2 REAL,
+                idx_induty_3 REAL,
+                idx_induty_4 REAL,
+                idx_induty_wghsm REAL,
+                frnchs_idx_induty_1 REAL,
+                frnchs_idx_induty_2 REAL,
+                frnchs_idx_induty_3 REAL,
+                frnchs_idx_induty_4 REAL,
+                frnchs_idx_induty_wghsm REAL,
+                olnlp_exche_scor REAL,
+                olnlp REAL,
+                vtlz_idex REAL,
+                PRIMARY KEY (strd_yr, ctpr_nm, signgu_nm, rdnmadr, strt_smrd_clsf)
+            );
+            CREATE INDEX IF NOT EXISTS idx_cv_sigungu ON commercial_vitality_road(strd_yr, ctpr_nm, signgu_nm);
+
+            CREATE TABLE IF NOT EXISTS trade_area_retail_kreb (
+                trdar_no TEXT NOT NULL PRIMARY KEY,
+                trdar_nm TEXT NOT NULL,
+                ctpr_nm TEXT NOT NULL,
+                signgu_nm TEXT NOT NULL,
+                opbn_rate REAL,
+                bnse_rate REAL,
+                cus_rate REAL,
+                tcbiz_rate REAL,
+                min_lng REAL NOT NULL,
+                min_lat REAL NOT NULL,
+                max_lng REAL NOT NULL,
+                max_lat REAL NOT NULL,
+                wkt TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_ta_kreb_bbox ON trade_area_retail_kreb(min_lat, max_lat, min_lng, max_lng);
+
+            CREATE TABLE IF NOT EXISTS oasis_retail_supply_ac (
+                data_strd_ym TEXT NOT NULL,
+                pnu TEXT NOT NULL,
+                legaldong_cd TEXT NOT NULL,
+                induty_cd TEXT NOT NULL,
+                sopsrt_spl_dims REAL NOT NULL,
+                clsf_no TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (data_strd_ym, pnu, induty_cd, clsf_no)
+            );
+            CREATE INDEX IF NOT EXISTS idx_ac_ld_ym ON oasis_retail_supply_ac(data_strd_ym, legaldong_cd);
         """)
         _migrate_retail_listings_columns(conn)
+
+
+def sqlite_table_row_count(table: str) -> Optional[int]:
+    """허용된 테이블만 행 수 조회 (/api/health 등)."""
+    allowed = frozenset({
+        "sns_floating_population",
+        "subway_station_footfall",
+        "commercial_vitality_road",
+        "trade_area_retail_kreb",
+        "oasis_retail_supply_ac",
+    })
+    if table not in allowed:
+        return None
+    try:
+        with get_db() as conn:
+            cur = conn.execute(f"SELECT COUNT(*) AS n FROM {table}")
+            row = cur.fetchone()
+            return int(row["n"]) if row else 0
+    except Exception:
+        return None
 
 
 def _migrate_retail_listings_columns(conn: sqlite3.Connection) -> None:
@@ -442,3 +544,42 @@ def count_retail_listings_active() -> int:
     with get_db() as conn:
         row = conn.execute("SELECT COUNT(*) AS c FROM retail_listings WHERE is_active = 1").fetchone()
         return int(row["c"]) if row else 0
+
+
+def _print_data_readiness_cli() -> int:
+    """
+    스크립트 파일 없이 Fly/로컬에서 DB 적재 상태 확인:
+      python database.py
+    Fly SSH (-C 는 셸이 아니므로 cd 불가 — 절대 경로 권장):
+      fly ssh console -a <앱> -C "python /app/database.py"
+    """
+    bjdong = os.path.join(_BASE, "data", "법정동코드 전체자료.txt")
+    print("=== BLUEDOT DB / data readiness ===")
+    print(f"DB_PATH: {DB_PATH}")
+    print(f"DB exists: {os.path.isfile(DB_PATH)}")
+    print(f"법정동 txt: {bjdong} -> {os.path.isfile(bjdong)}")
+    kakao = (os.environ.get("KAKAO_REST_KEY") or "").strip()
+    print(f"KAKAO_REST_KEY: {'set (' + str(len(kakao)) + ' chars)' if kakao else 'EMPTY'}")
+    if not os.path.isfile(DB_PATH):
+        print("[요약] DB 파일 없음 — 볼륨 마운트·BLUEDOT_DB_PATH 확인")
+        return 1
+    with sqlite3.connect(DB_PATH) as conn:
+        for t in (
+            "sns_floating_population",
+            "commercial_vitality_road",
+            "subway_station_footfall",
+            "trade_area_retail_kreb",
+            "oasis_retail_supply_ac",
+        ):
+            try:
+                n = conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+                ok = "OK" if n > 0 else "EMPTY"
+                print(f"  {t}: {int(n):,} ({ok})")
+            except Exception as e:
+                print(f"  {t}: ERROR {e}")
+    print("또는 브라우저: GET /api/health → oasis_sqlite_rows")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_print_data_readiness_cli())

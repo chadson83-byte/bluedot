@@ -30,8 +30,14 @@
         // 비로컬에서는 반드시 Fly 직통: 상대 /api 는 Vercel 리라이트 프록시가 ~10초 전후로 끊겨 분석 타임아웃이 난다.
         (function () {
             var h = (typeof location !== 'undefined' && location.hostname) ? location.hostname : '';
+            var o = (typeof location !== 'undefined' && location.origin) ? location.origin.replace(/\/$/, '') : '';
             if (/^(localhost|127\.0\.0\.1)$/i.test(h)) {
                 window.BLUEDOT_API_BASE = '';
+            } else if (/\.fly\.dev$/i.test(h) && o) {
+                /* 프론트·API 동일 Fly 앱: CORS·오리진 불일치 없이 같은 호스트로 호출 */
+                window.BLUEDOT_API_BASE = o;
+            } else if (/\.vercel\.app$/i.test(h)) {
+                window.BLUEDOT_API_BASE = 'https://bluedot-backend-autumn-grass-4638.fly.dev';
             } else {
                 window.BLUEDOT_API_BASE = 'https://bluedot-backend-autumn-grass-4638.fly.dev';
             }
@@ -310,6 +316,18 @@
             </div>
         </header>
 
+        <div id="data-readiness-banner" class="data-readiness-banner" hidden role="region" aria-label="데이터 연결 상태">
+            <div class="data-readiness-banner__row">
+                <span class="data-readiness-banner__icon" aria-hidden="true">📋</span>
+                <div class="data-readiness-banner__text">
+                    <strong class="data-readiness-banner__title">데이터·정밀도 안내</strong>
+                    <p class="data-readiness-banner__lead" id="data-readiness-lead"></p>
+                </div>
+                <button type="button" class="data-readiness-banner__toggle" id="data-readiness-toggle" aria-expanded="false">펼치기</button>
+            </div>
+            <div class="data-readiness-banner__detail" id="data-readiness-detail" hidden></div>
+        </div>
+
         <div class="ai-search-box">
             <svg viewBox="0 0 24 24" class="ai-sparkle"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>
             <input type="text" id="ai-search-input" placeholder="예: 소아과 개원할 신축 아파트 상권 찾아줘" onkeypress="if(event.keyCode==13) submitAISearch()">
@@ -325,7 +343,11 @@
                         <div style="flex: 1; min-width: 0;">
                             <h2 class="results-title-main">1단계 · 상위 추천 상권 (Top 5)</h2>
                             <div class="results-title-sub">4대 공공데이터 교차 검증</div>
-                            <div class="results-title-hint">권역 카드의 <strong>이 권역 2단계 분석</strong>으로 해당 권역만 대상으로 미시 입지 약 5곳을 받을 수 있습니다. PC는 지도 <strong>우클릭 → 2단계 분석</strong>, 모바일은 핀을 두고 <strong>2단계 분석하기</strong>로 포인터 주변 최대 5곳을 엽니다. 2단계 후에는 말풍선·표·<strong>후보 근처 맵 탭</strong>으로 <strong>8층 건물 상승·경쟁·추천 층</strong> 요약이 뜹니다. 정밀 리포트에서도 동일 권역 2단계를 실행할 수 있습니다.</div>
+                            <div class="results-title-hint results-title-hint--compact">카드 <strong>2단계 분석</strong> · PC <strong>지도 우클릭</strong> · 모바일 <strong>2단계 분석하기</strong></div>
+                            <details class="results-title-details no-print">
+                                <summary class="results-title-details-sum">안내 더보기</summary>
+                                <div class="results-title-details-body">권역 카드의 <strong>이 권역 2단계 분석</strong>으로 미시 입지 약 5곳. 2단계 후 표·말풍선·<strong>맵 탭</strong>에서 층·경쟁 요약. 정밀 리포트에서도 동일 권역 2단계 실행 가능.</div>
+                            </details>
                         </div>
                         <div class="results-header-actions">
                             <div class="results-close-x" onclick="closeResults()">닫기</div>
@@ -337,6 +359,10 @@
                             <button type="button" class="stage2-fs-btn" onclick="openStage2FullscreenCompare()">전체 화면 비교</button>
                             <button type="button" class="stage2-toolbar-naver" onclick="window.openNaverLandAtMapFocus()" title="2단계 1위 좌표·줌 기준 월세 상가 목록(없으면 지도 중심)">월세 상가 (네이버)</button>
                         </div>
+                        <div id="results-phase-actions" class="results-phase-actions no-print" style="display: none;" aria-label="단계별 패널 접기">
+                            <button type="button" class="results-phase-btn" id="btn-close-stage2-panel">2단계 분석결과 닫기</button>
+                            <button type="button" class="results-phase-btn results-phase-btn--secondary" id="btn-close-stage1-panel">1단계 분석결과 닫기</button>
+                        </div>
                         <div class="stage2-compare-scroll">
                             <div id="stage2-compare-table-host"></div>
                         </div>
@@ -347,6 +373,7 @@
                         <span class="results-panel-grip-text">아래는 <b>1단계</b> 권역 카드 · 마우스를 패널 밖으로 빼면 전체가 접혀 지도만 보입니다</span>
                     </div>
                     <div class="results-panel-body">
+                        <p id="results-card-scroll-hint" class="results-card-scroll-hint no-print" style="display: none;" role="note">◀ 좌우로 밀어 <strong>2~5위</strong> 카드 확인 ▶</p>
                         <div class="results-card-slider results-card-slider--stage1" id="results-cards-container"></div>
                     </div>
                 </div>
@@ -355,6 +382,10 @@
                         <span class="results-panel-peektab-chev">▲</span>
                         <span class="results-panel-peektab-text">BLUEDOT 분석 결과 (1·2단계) · <strong>마우스를 올려 펼치기</strong> · 치우면 지도 전체 보기</span>
                     </button>
+                    <div class="results-panel-peek-chips">
+                        <button type="button" class="results-peek-chip" id="peek-restore-stage1" style="display: none;">1단계 다시 보기</button>
+                        <button type="button" class="results-peek-chip" id="peek-restore-stage2" style="display: none;">2단계 다시 보기</button>
+                    </div>
                     <button type="button" class="results-panel-peek-close" onclick="event.stopPropagation(); closeResults();" aria-label="분석 결과 닫고 새로 분석">✕ 닫기</button>
                 </div>
             </div>

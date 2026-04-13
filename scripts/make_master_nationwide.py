@@ -241,7 +241,8 @@ def load_population(grouped):
     n = len(grouped)
     base = 8000 + grouped["hosp_count"] * 800  # 병원 밀집도와 어느정도 상관
     noise = np.random.uniform(0.7, 1.5, n)
-    grouped["총인구 (명)"] = (base * noise).clip(1000, 80000).astype(int)
+    # 과거 8만 상한은 카드에 '허위 8만명'으로 오인되기 쉬움. 실데이터 CSV 없을 때만 쓰는 추정이므로 상한만 완화.
+    grouped["총인구 (명)"] = (base * noise).clip(1000, 250000).astype(int)
     grouped["젊은층_비중"] = 0.2 + (grouped["subway_count"] * 0.02).clip(upper=0.2)
     return grouped
 

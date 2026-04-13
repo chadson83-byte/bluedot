@@ -124,6 +124,139 @@ async function parseJsonSafe(res) {
     }
 }
 
+/** /api/health 의 data_readiness → 상단 배너 */
+async function refreshDataReadinessBanner() {
+    const wrap = document.getElementById('data-readiness-banner');
+    const lead = document.getElementById('data-readiness-lead');
+    const detail = document.getElementById('data-readiness-detail');
+    const toggle = document.getElementById('data-readiness-toggle');
+    if (!wrap || !lead || !detail || !toggle) return;
+    const origin = bluedotBackendOrigin();
+    let h;
+    try {
+        const r = await fetchWithTimeout(origin + '/api/health', { method: 'GET', timeout: 14000 });
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        h = await parseJsonSafe(r);
+    } catch (e) {
+        wrap.hidden = false;
+        wrap.classList.remove('data-readiness-banner--ok');
+        const msg = String(e && e.message ? e.message : e);
+        lead.textContent = '백엔드 /api/health 를 불러오지 못했습니다. Fly·로컬 API 주소와 서버 기동을 확인하세요.';
+        detail.innerHTML = '<p class="data-readiness-banner__note">' + msg.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;') + '</p>';
+        detail.hidden = false;
+        toggle.textContent = '접기';
+        toggle.setAttribute('aria-expanded', 'true');
+        toggle.onclick = function () {
+            const open = detail.hidden;
+            detail.hidden = !open;
+            toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+            toggle.textContent = open ? '접기' : '펼치기';
+        };
+        return;
+    }
+    const dr = h.data_readiness || {};
+    const blocking = Array.isArray(dr.blocking_gaps) ? dr.blocking_gaps : [];
+    const recommended = Array.isArray(dr.recommended_gaps) ? dr.recommended_gaps : [];
+    const optional = Array.isArray(dr.optional_gaps) ? dr.optional_gaps : [];
+    const gaps = Array.isArray(dr.gaps) ? dr.gaps : [].concat(blocking, recommended, optional);
+    const pcNote = dr.pc_data_folder_note_ko || '';
+    const modelNote = dr.model_outputs_note_ko || '';
+    const pdfNote = dr.pdf_files_note_ko || '';
+    const apiReq = Array.isArray(dr.api_requirements) ? dr.api_requirements : [];
+    const fileChk = Array.isArray(dr.data_files_checklist) ? dr.data_files_checklist : [];
+    const oasis = h.oasis_sqlite_rows || {};
+    wrap.hidden = false;
+    const bn = blocking.length;
+    const rn = recommended.length;
+    const on = optional.length;
+    if (bn > 0) {
+        wrap.classList.remove('data-readiness-banner--ok');
+        lead.textContent = '미반영 원인 ' + bn + '건(필수). 아래 「즉시 조치」를 Fly 서버에서 해결하면 트렌드·법정동 연동이 살아납니다. PostGIS는 필수 아님.';
+    } else if (rn > 0) {
+        wrap.classList.remove('data-readiness-banner--ok');
+        lead.textContent = '필수(트렌드·카카오)는 연결됨. 역세권·상권활성도 등 권장 ' + rn + '건이 남았습니다. 「펼치기」에서 CSV 적재 확인.';
+    } else if (on > 0) {
+        wrap.classList.add('data-readiness-banner--ok');
+        lead.textContent = '공공 CSV·필수 API는 반영된 상태입니다. PostGIS·MOCT는 정밀도 옵션(' + on + '건)이며 미연결 시에도 서비스는 동작합니다.';
+    } else {
+        wrap.classList.add('data-readiness-banner--ok');
+        lead.textContent = '데이터 파이프라인·요구 API가 연결된 것으로 보입니다. 점수·추정치는 모형 산출입니다 — 「펼치기」 참고.';
+    }
+    const sevClass = (s) => {
+        if (s === 'high') return 'data-readiness-banner__sev--high';
+        if (s === 'medium') return 'data-readiness-banner__sev--medium';
+        return 'data-readiness-banner__sev--low';
+    };
+    const sevLabel = (s, tier) => {
+        if (tier === 'optional') return '선택';
+        return s === 'high' ? '필수' : s === 'medium' ? '권장' : '선택';
+    };
+    const esc = (t) => String(t || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    const gapBlock = (title, arr) => {
+        if (!arr || !arr.length) return '';
+        let s = '<h4 class="data-readiness-banner__h4">' + esc(title) + '</h4>';
+        arr.forEach((g) => {
+            const sev = String(g.severity || 'low');
+            const tier = String(g.tier || '');
+            s += '<div class="data-readiness-banner__gap">';
+            s += '<p class="data-readiness-banner__gap-title"><span class="data-readiness-banner__sev ' + sevClass(sev) + '">' + esc(sevLabel(sev, tier)) + '</span>' + esc(g.title_ko || '') + '</p>';
+            s += '<p class="data-readiness-banner__gap-action">' + esc(g.action_ko || '') + '</p>';
+            s += '</div>';
+        });
+        return s;
+    };
+    let html = '';
+    if (pdfNote) html += '<p class="data-readiness-banner__note"><strong>PDF:</strong> ' + esc(pdfNote) + '</p>';
+    if (pcNote) html += '<p class="data-readiness-banner__note">' + esc(pcNote) + '</p>';
+    if (apiReq.length) {
+        html += '<h4 class="data-readiness-banner__h4">필요 API·키 (체크리스트)</h4><ul class="data-readiness-banner__ul">';
+        apiReq.forEach((a) => {
+            const req = a.required ? '필수' : '선택';
+            let st = '—';
+            if (a.layer === 'browser') st = '브라우저 설정';
+            else if (a.configured === true) st = '설정됨';
+            else if (a.configured === false) st = '미설정';
+            html += '<li><code>' + esc(a.env_var || '') + '</code> · ' + esc(req) + ' · <strong>' + esc(st) + '</strong><br><span class="data-readiness-banner__sub">' + esc(a.used_for_ko || '') + '</span></li>';
+        });
+        html += '</ul>';
+    }
+    if (fileChk.length) {
+        html += '<h4 class="data-readiness-banner__h4">엔진이 읽는 공공 CSV → SQLite</h4><table class="data-readiness-banner__tbl"><thead><tr><th>파일</th><th>테이블</th><th>행수</th></tr></thead><tbody>';
+        fileChk.forEach((f) => {
+            const rows = f.row_count != null ? String(f.row_count) : (oasis[f.sqlite_table] != null ? String(oasis[f.sqlite_table]) : '—');
+            html += '<tr><td>' + esc(f.filename_hint_ko || '') + '</td><td><code>' + esc(f.sqlite_table || '') + '</code></td><td>' + esc(rows) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+    }
+    html += gapBlock('즉시 조치 (미반영)', blocking);
+    html += gapBlock('권장 (보조 카드)', recommended);
+    html += gapBlock('선택 (정밀도)', optional);
+    if (!blocking.length && !recommended.length && !optional.length && gaps.length) {
+        gaps.forEach((g) => {
+            const sev = String(g.severity || 'low');
+            html += '<div class="data-readiness-banner__gap">';
+            html += '<p class="data-readiness-banner__gap-title"><span class="data-readiness-banner__sev ' + sevClass(sev) + '">' + esc(sevLabel(sev, String(g.tier || ''))) + '</span>' + esc(g.title_ko || '') + '</p>';
+            html += '<p class="data-readiness-banner__gap-action">' + esc(g.action_ko || '') + '</p>';
+            html += '</div>';
+        });
+    }
+    if (modelNote) html += '<p class="data-readiness-banner__note"><strong>정밀도 한계:</strong> ' + esc(modelNote) + '</p>';
+    detail.innerHTML = html;
+    detail.hidden = true;
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.textContent = '펼치기';
+    toggle.onclick = function () {
+        const open = detail.hidden;
+        detail.hidden = !open;
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        toggle.textContent = open ? '접기' : '펼치기';
+    };
+}
+
 // Vercel 배포 시 vercel.json 리라이트로 /api 를 넘기면 장시간 분석이 프록시 타임아웃(약 60초)에 걸림 → Fly 직접 호출
 const BLUEDOT_VERCEL_FLY_ORIGIN = 'https://bluedot-backend-autumn-grass-4638.fly.dev';
 
@@ -140,6 +273,9 @@ const BLUEDOT_API_BASE = (() => {
     }
     if (w && w.location && /\.vercel\.app$/i.test(w.location.hostname)) {
         return BLUEDOT_VERCEL_FLY_ORIGIN;
+    }
+    if (w && w.location && /\.fly\.dev$/i.test(w.location.hostname) && w.location.origin) {
+        return String(w.location.origin).replace(/\/$/, '');
     }
     // 그 외 커스텀 도메인 등: 같은 오리진 /api (리버스 프록시가 긴 타임아웃 허용할 때)
     return '';
@@ -396,6 +532,13 @@ let stage2MapObjects = [];
 let stage2TowerOverlay = null;
 let stage2Data = null;
 let stage2RoadviewWidget = null;
+/** 결과 패널: 1·2단계 구역만 접어 지도 위주로 보기 */
+let resultsStage1PanelVisible = true;
+let resultsStage2PanelVisible = true;
+/** 같은 1단계 세션에서 2단계 완료 후 자동 리포트 모달 1회만 */
+let _autoReportModalOpenedForCurrentMacro = false;
+/** 2단계 직전에 선택된 1단계 카드 인덱스(자동 리포트 시 해당 권역 리포트) */
+let lastStage2ReportModalIndex = 0;
 
 /** DB 등록 상가 매물 레이어 (건물 footprint + 의사 3D 카드 + 경쟁 POI) */
 let retailListingsLayerOn = true;
@@ -438,6 +581,129 @@ function haversineMeters(lat1, lng1, lat2, lng2) {
     const a = 0.5 - Math.cos((lat2 - lat1) * p) / 2
         + Math.cos(lat1 * p) * Math.cos(lat2 * p) * (1 - Math.cos((lng2 - lng1) * p)) / 2;
     return R * 2 * Math.asin(Math.sqrt(Math.min(1, Math.max(0, a))));
+}
+
+/** 경쟁사 vs 비교용: 1단계 1위 권역 중심, 없으면 지도 중심 */
+function getBluedotCandidateCompareLatLng() {
+    if (Array.isArray(currentAnalysisData) && currentAnalysisData.length > 0) {
+        const r = currentAnalysisData[0];
+        const la = Number(r.lat);
+        const ln = Number(r.lng);
+        if (Number.isFinite(la) && Number.isFinite(ln)) return { lat: la, lng: ln };
+    }
+    if (map && typeof map.getCenter === 'function') {
+        const c = map.getCenter();
+        return { lat: c.getLat(), lng: c.getLng() };
+    }
+    return null;
+}
+
+function _competitorSafeDomId(h) {
+    return String(h && h.id != null ? h.id : 'h').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 56);
+}
+
+function destroyCompetitorProfileRadarChart() {
+    if (competitorProfileRadarChart) {
+        try { competitorProfileRadarChart.destroy(); } catch (_) { /* ignore */ }
+        competitorProfileRadarChart = null;
+    }
+}
+
+function renderCompetitorProfileRadar(canvasEl, analysis) {
+    if (!canvasEl || typeof Chart === 'undefined') return;
+    destroyCompetitorProfileRadarChart();
+    const rd = analysis && analysis.radar;
+    if (!rd || !Array.isArray(rd.labels) || !Array.isArray(rd.competitor)) return;
+    const labels = rd.labels;
+    const comp = rd.competitor;
+    const cand = Array.isArray(rd.candidate) ? rd.candidate : null;
+    const datasets = [{
+        label: '경쟁 기관',
+        data: comp,
+        fill: true,
+        backgroundColor: 'rgba(224, 122, 95, 0.22)',
+        borderColor: 'rgba(224, 122, 95, 0.95)',
+        pointBackgroundColor: 'rgba(224, 122, 95, 1)',
+        pointBorderColor: '#fff',
+        borderWidth: 2,
+    }];
+    if (cand && cand.length === labels.length) {
+        datasets.push({
+            label: '나의 후보(비교)',
+            data: cand,
+            fill: true,
+            backgroundColor: 'rgba(15, 23, 42, 0.08)',
+            borderColor: 'rgba(51, 65, 85, 0.88)',
+            pointBackgroundColor: 'rgba(51, 65, 85, 1)',
+            pointBorderColor: '#fff',
+            borderWidth: 2,
+        });
+    }
+    competitorProfileRadarChart = new Chart(canvasEl.getContext('2d'), {
+        type: 'radar',
+        data: { labels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                r: {
+                    min: 0,
+                    max: 100,
+                    ticks: { stepSize: 25, font: { size: 9, family: 'Pretendard' }, color: '#64748b', backdropColor: 'transparent' },
+                    grid: { color: 'rgba(100, 116, 139, 0.18)' },
+                    angleLines: { color: 'rgba(100, 116, 139, 0.15)' },
+                    pointLabels: {
+                        font: { size: 10, weight: '700', family: 'Pretendard' },
+                        color: '#334155',
+                        padding: 4,
+                    },
+                },
+            },
+            plugins: {
+                legend: {
+                    display: datasets.length > 1,
+                    position: 'bottom',
+                    labels: { boxWidth: 10, font: { size: 10, family: 'Pretendard' }, color: '#475569' },
+                },
+            },
+        },
+    });
+}
+
+async function fetchCompetitorAnalysisForMarker(h) {
+    const la = Number(h.lat);
+    const ln = Number(h.lng);
+    if (!Number.isFinite(la) || !Number.isFinite(ln)) return null;
+    const body = {
+        competitor_lat: la,
+        competitor_lng: ln,
+        dept: selectedDeptName || '한의원',
+    };
+    const pnu = h.pnu != null && String(h.pnu).trim() ? String(h.pnu).trim() : null;
+    if (pnu) body.pnu = pnu;
+    const cand = getBluedotCandidateCompareLatLng();
+    if (cand) {
+        body.candidate_lat = cand.lat;
+        body.candidate_lng = cand.lng;
+    }
+    const url = `${bluedotBackendOrigin()}/api/competitor-analysis`;
+    const res = await fetchWithTimeout(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        timeout: 90000,
+    });
+    const data = await parseJsonSafe(res);
+    if (!res.ok) {
+        let detail = '';
+        if (data && Array.isArray(data.detail)) {
+            detail = data.detail.map((d) => (d && (d.msg || d.message)) ? String(d.msg || d.message) : String(d)).join('; ');
+        } else if (data && data.detail != null) {
+            detail = String(data.detail);
+        }
+        throw new Error(detail || ('HTTP ' + res.status));
+    }
+    return data;
 }
 
 let _stage2MapCenterCtaIdleTimer = null;
@@ -544,6 +810,8 @@ let demoChart = null;
 let revChart = null;
 let radarChart = null;
 let timeMatrixChart = null;
+/** 경쟁 병원 호버 카드 미니 레이더 */
+let competitorProfileRadarChart = null;
 
 const DEPT_ICONS = {
     1:'🩺', 2:'✨', 3:'🦷', 4:'👁️', 5:'🦴', 6:'🌿', 
@@ -665,6 +933,8 @@ window.addEventListener('load', () => {
         }
     }, 2000);
     try { initAnalysisDock(); } catch (_) { /* ignore */ }
+    try { initResultsPhasePanelControls(); } catch (_) { /* ignore */ }
+    try { refreshDataReadinessBanner(); } catch (_) { /* ignore */ }
 });
 
 function zoomIn() { if (map) map.setLevel(map.getLevel() - 1); }
@@ -1527,11 +1797,100 @@ function teardownStage2Ui() {
     const cards = document.getElementById('stage2-cards-container');
     const compareHost = document.getElementById('stage2-compare-table-host');
     const toolbar = document.getElementById('stage2-toolbar');
-    if (sec) sec.style.display = 'none';
+    const ph = document.getElementById('results-phase-actions');
+    if (sec) {
+        sec.style.display = 'none';
+        sec.classList.remove('is-collapsed');
+    }
     if (head) head.innerHTML = '';
     if (cards) cards.innerHTML = '';
     if (compareHost) compareHost.innerHTML = '';
     if (toolbar) toolbar.style.display = 'none';
+    if (ph) ph.style.display = 'none';
+    resultsStage2PanelVisible = true;
+    syncResultsPhasePeekRestores();
+}
+
+function syncResultsPhasePeekRestores() {
+    const b1 = document.getElementById('peek-restore-stage1');
+    const b2 = document.getElementById('peek-restore-stage2');
+    const rp = document.getElementById('results-panel');
+    if (!b1 || !b2) return;
+    const panelOpen = rp && rp.style.display !== 'none';
+    const hasS2 = !!(stage2Data && Array.isArray(stage2Data.top_buildings) && stage2Data.top_buildings.length);
+    b1.style.display = panelOpen && !resultsStage1PanelVisible ? 'inline-flex' : 'none';
+    b2.style.display = panelOpen && !resultsStage2PanelVisible && hasS2 ? 'inline-flex' : 'none';
+}
+
+function resetResultsPhasePanelsState() {
+    _autoReportModalOpenedForCurrentMacro = false;
+    resultsStage1PanelVisible = true;
+    resultsStage2PanelVisible = true;
+    const rp = document.getElementById('results-panel');
+    if (rp) rp.classList.remove('results-panel--stage1-hidden');
+    const sec = document.getElementById('stage2-report-section');
+    if (sec) sec.classList.remove('is-collapsed');
+    const ph = document.getElementById('results-phase-actions');
+    if (ph) ph.style.display = 'none';
+    syncResultsPhasePeekRestores();
+}
+
+window.closeStage2ResultsPanel = function () {
+    const sec = document.getElementById('stage2-report-section');
+    const ph = document.getElementById('results-phase-actions');
+    if (!sec) return;
+    try { closeStage2FullscreenCompare(); } catch (_) { /* ignore */ }
+    sec.classList.add('is-collapsed');
+    sec.style.display = 'none';
+    clearStage2Markers();
+    resultsStage2PanelVisible = false;
+    if (ph) ph.style.display = 'none';
+    syncResultsPhasePeekRestores();
+};
+
+window.restoreStage2ResultsPanel = function () {
+    if (!stage2Data || !Array.isArray(stage2Data.top_buildings) || !stage2Data.top_buildings.length) return;
+    const sec = document.getElementById('stage2-report-section');
+    const ph = document.getElementById('results-phase-actions');
+    const toolbar = document.getElementById('stage2-toolbar');
+    if (!sec) return;
+    sec.classList.remove('is-collapsed');
+    sec.style.display = 'block';
+    resultsStage2PanelVisible = true;
+    if (toolbar && stage2Data.top_buildings.length) toolbar.style.display = 'flex';
+    if (ph) ph.style.display = 'flex';
+    drawStage2Markers(stage2Data.top_buildings);
+    syncResultsPhasePeekRestores();
+};
+
+window.closeStage1ResultsPanel = function () {
+    const rp = document.getElementById('results-panel');
+    if (!rp) return;
+    rp.classList.add('results-panel--stage1-hidden');
+    resultsStage1PanelVisible = false;
+    syncResultsPhasePeekRestores();
+};
+
+window.restoreStage1ResultsPanel = function () {
+    const rp = document.getElementById('results-panel');
+    if (!rp) return;
+    rp.classList.remove('results-panel--stage1-hidden');
+    resultsStage1PanelVisible = true;
+    syncResultsPhasePeekRestores();
+};
+
+let _resultsPhaseControlsBound = false;
+function initResultsPhasePanelControls() {
+    if (_resultsPhaseControlsBound) return;
+    _resultsPhaseControlsBound = true;
+    const b2 = document.getElementById('btn-close-stage2-panel');
+    const b1 = document.getElementById('btn-close-stage1-panel');
+    const r1 = document.getElementById('peek-restore-stage1');
+    const r2 = document.getElementById('peek-restore-stage2');
+    if (b2) b2.addEventListener('click', (e) => { e.stopPropagation(); window.closeStage2ResultsPanel(); });
+    if (b1) b1.addEventListener('click', (e) => { e.stopPropagation(); window.closeStage1ResultsPanel(); });
+    if (r1) r1.addEventListener('click', (e) => { e.stopPropagation(); window.restoreStage1ResultsPanel(); });
+    if (r2) r2.addEventListener('click', (e) => { e.stopPropagation(); window.restoreStage2ResultsPanel(); });
 }
 
 function drawStage2Markers(top) {
@@ -1541,11 +1900,20 @@ function drawStage2Markers(top) {
         const pos = new kakao.maps.LatLng(c.lat, c.lng);
         const lines = stage2CardTitleLines(c);
         const gcol = stage2GradeColor((c.scoring || {}).grade);
+        const snsN = c.trend_fpop_norm;
+        const subN = c.subway_fpop_norm;
+        let combo = null;
+        if (snsN != null && !Number.isNaN(Number(snsN)) && subN != null && !Number.isNaN(Number(subN))) {
+            combo = Math.max(Number(snsN), Number(subN));
+        } else if (snsN != null && !Number.isNaN(Number(snsN))) combo = Number(snsN);
+        else if (subN != null && !Number.isNaN(Number(subN))) combo = Number(subN);
+        const heat = stage2TrendHeatColor(combo);
+        const pinCol = heat || gcol;
         let subDisp = lines.sub;
         if (subDisp.length > 38) subDisp = subDisp.slice(0, 36) + '…';
         const safeMain = escHtml2(lines.main);
         const safeSub = escHtml2(subDisp);
-        const content = `<div class="stage2-pin-wrap" style="--s2col:${gcol}">
+        const content = `<div class="stage2-pin-wrap" style="--s2col:${pinCol}">
             <div class="stage2-pin-pulse"></div>
             <div class="stage2-pin-bubble">
                 <div class="stage2-pin-bubble-main" role="button" tabindex="0" onclick="event.stopPropagation();window.showStage2MapTower(${i})" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();window.showStage2MapTower(${i});}">
@@ -1554,7 +1922,7 @@ function drawStage2Markers(top) {
                 </div>
                 <button type="button" class="stage2-pin-naver-btn" onclick="event.stopPropagation();window.openNaverLandForStage2Candidate(${i});" title="이 좌표·줌 기준 월세 상가·사무실 목록">월세 상가</button>
             </div>
-            <div class="stage2-pin-arrow" style="border-top-color:${gcol}"></div>
+            <div class="stage2-pin-arrow" style="border-top-color:${pinCol}"></div>
         </div>`;
         const ov = new kakao.maps.CustomOverlay({
             position: pos,
@@ -1575,12 +1943,183 @@ function escHtml2(s) {
         .replace(/"/g, '&quot;');
 }
 
+function formatStage1TrendBlock(rec) {
+    const disp = rec.trend_fpop_display;
+    const band = rec.trend_percentile_band_ko || '—';
+    const w = rec.trend_weight != null && !Number.isNaN(Number(rec.trend_weight))
+        ? Math.round(Number(rec.trend_weight) * 100)
+        : null;
+    const hasSignal = disp != null && !Number.isNaN(Number(disp));
+    if (!hasSignal) {
+        return '';
+    }
+    const score = Math.round(Number(disp));
+    const pct = Math.max(0, Math.min(100, score));
+    const wtxt = w != null ? ` · 과목 반영 ${w}%` : '';
+    const geoSrc = String(rec.trend_geo_source || '');
+    const footExtra = geoSrc === 'subway_anchor_kakao' ? ' · 최근접 역 좌표로 법정동 매칭' : '';
+    return `
+        <div class="rc-trend-block">
+            <div class="rc-trend-head">
+                <span class="rc-trend-badge" title="오아시스 SNS·유동 프록시">트렌드 유동성</span>
+                <span class="rc-trend-scoreline">🔥 ${score}/100${wtxt}</span>
+            </div>
+            <div class="rc-trend-bar" aria-hidden="true"><div class="rc-trend-bar__fill" style="width:${pct}%"></div></div>
+            <div class="rc-trend-foot">지역 내 ${escHtml2(band)} 구간${footExtra}</div>
+        </div>`;
+}
+
+function formatStage1VitalityBlock(rec) {
+    const avg = rec.vitality_sigungu_avg;
+    const band = rec.vitality_percentile_band_ko || '—';
+    const pxRaw = rec.vitality_proxy_0_100;
+    const w = rec.vitality_blend_weight != null && !Number.isNaN(Number(rec.vitality_blend_weight))
+        ? Math.round(Number(rec.vitality_blend_weight) * 100)
+        : null;
+    const hasAvg = avg != null && !Number.isNaN(Number(avg));
+    const hasPx = pxRaw != null && !Number.isNaN(Number(pxRaw));
+    const hasMatch = hasAvg || hasPx;
+    if (!hasMatch) {
+        const rg = String(rec.vitality_region_hint_ko || '').trim();
+        if (rg) {
+            return `
+        <div class="rc-subway-block rc-vitality-block rc-vitality-block--hint">
+            <div class="rc-subway-head"><span class="rc-subway-badge">상권 활성도</span></div>
+            <div class="rc-subway-lines">📍 추정 행정구역: ${escHtml2(rg)}</div>
+            <div class="rc-subway-lines rc-subway-lines--sub">도로단위 ES1013 집계 구간이 없거나 보조 상권 데이터가 없습니다. (점수 미반영)</div>
+        </div>`;
+        }
+        return '';
+    }
+    const wtxt = w != null ? ` · 과목 반영 ${w}%` : '';
+    const avn = hasAvg ? Math.round(Number(avg)) : null;
+    const pxNum = hasPx ? Math.round(Number(pxRaw)) : null;
+    const barW = pxNum != null ? Math.max(0, Math.min(100, Number(pxRaw))) : 0;
+    const vds = String(rec.vitality_data_source || '');
+    const kreb = vds === 'kreb_es1001ay';
+    const tnm = (rec.vitality_trdar_nm || '').trim();
+    let line1;
+    let line2;
+    if (kreb && avn != null) {
+        line1 = `📊 주요 상권${tnm ? ` 「${escHtml2(tnm)}」` : ''} · 영업중 상가 건물 비율 약 ${avn}%`;
+        line2 = `한국부동산원 ES1001AY 보조${pxNum != null ? ` · 프록시 ${pxNum}/100` : ''}${wtxt}`;
+    } else {
+        line1 = avn != null
+            ? `📊 시·군·구 평균 활성화지수(원값) 약 ${avn}`
+            : '📊 상권 활성도 (시군구 프록시)';
+        line2 = `전국 시군구 대비 ${escHtml2(band)}${pxNum != null ? ` · 프록시 ${pxNum}/100` : ''}${wtxt}`;
+    }
+    return `
+        <div class="rc-subway-block rc-vitality-block">
+            <div class="rc-subway-head">
+                <span class="rc-subway-badge" title="${kreb ? '한국부동산원 ES1001AY 주요상권 보조' : '상권활성도지수 ES1013'}">상권 활성도</span>
+            </div>
+            <div class="rc-subway-lines">${line1}</div>
+            <div class="rc-subway-lines rc-subway-lines--sub">${line2}</div>
+            ${pxNum != null ? `<div class="rc-trend-bar rc-subway-bar" aria-hidden="true"><div class="rc-trend-bar__fill rc-subway-bar__fill" style="width:${barW}%"></div></div>` : ''}
+        </div>`;
+}
+
+function formatStage1RetailSupplyBlock(rec) {
+    const avg = rec.retail_supply_avg;
+    const band = rec.retail_supply_percentile_band_ko || '—';
+    const ym = rec.retail_supply_strd_ym;
+    const nParcels = rec.retail_supply_n_parcels;
+    const hasAvg = avg != null && !Number.isNaN(Number(avg));
+    if (!hasAvg) {
+        const catalogOk = rec.retail_supply_catalog_loaded === true;
+        const b = String(rec.legaldong_b_code || '').replace(/\D/g, '');
+        if (catalogOk && b.length >= 8) {
+            return `
+        <div class="rc-subway-block rc-retail-supply-block rc-retail-supply-block--hint">
+            <div class="rc-subway-head"><span class="rc-subway-badge" title="오아시스 ES1007AC">상가 공급(참고)</span></div>
+            <div class="rc-subway-lines">이 법정동은 ES1007AC 필지·업종 집계에 포함되지 않았습니다.</div>
+            <div class="rc-subway-lines rc-subway-lines--sub">종합 점수에는 반영되지 않습니다.</div>
+        </div>`;
+        }
+        return '';
+    }
+    const avTxt = Number(avg).toFixed(3);
+    const ymTxt = ym ? String(ym) : '—';
+    const nTxt = nParcels != null && !Number.isNaN(Number(nParcels)) ? Number(nParcels).toLocaleString() : '—';
+    return `
+        <div class="rc-subway-block rc-retail-supply-block">
+            <div class="rc-subway-head">
+                <span class="rc-subway-badge" title="오아시스 ES1007AC · 점수 미반영">상가 공급(참고)</span>
+            </div>
+            <div class="rc-subway-lines">📐 동 평균 인당 상가공급면적 약 ${escHtml2(avTxt)} ㎡/명</div>
+            <div class="rc-subway-lines rc-subway-lines--sub">전국 법정동 분포 대비 ${escHtml2(band)} · 기준 ${escHtml2(ymTxt)} · 필지 ${escHtml2(nTxt)}건</div>
+        </div>`;
+}
+
+function formatStage1SubwayBlock(rec) {
+    if (rec.subway_card_silence === true) {
+        return '';
+    }
+    const nm = rec.subway_nearest_stn_nm;
+    const px = rec.subway_fpop_proxy_0_100;
+    const dist = rec.subway_nearest_dist_m;
+    const band = rec.subway_percentile_band_ko || '—';
+    const w = rec.subway_blend_weight != null && !Number.isNaN(Number(rec.subway_blend_weight))
+        ? Math.round(Number(rec.subway_blend_weight) * 100)
+        : null;
+    const hasHub = nm && dist != null && !Number.isNaN(Number(dist));
+    const hasPxNum = px != null && !Number.isNaN(Number(px));
+    if (!hasHub && !hasPxNum) {
+        if (band && band !== '—') {
+            return `
+        <div class="rc-subway-block">
+            <div class="rc-subway-head">
+                <span class="rc-subway-badge" title="오아시스 ES1007BD">역세권 유동</span>
+            </div>
+            <div class="rc-subway-lines">🚇 인근 역 허브</div>
+            <div class="rc-subway-lines rc-subway-lines--sub">전국 역 단위 기준 ${escHtml2(band)} (역·거리 상세 미매칭)</div>
+            <div class="rc-subway-foot">데이터는 적재되어 있으나 이 좌표에서 최근접 역 거리를 못 찾은 경우입니다.</div>
+        </div>`;
+        }
+        return '';
+    }
+    const pxNum = hasPxNum ? Math.round(Number(px)) : null;
+    const barW = pxNum != null ? Math.max(0, Math.min(100, pxNum)) : 0;
+    const wtxt = w != null ? ` · 과목 반영 ${w}%` : '';
+    const line1 = hasHub
+        ? `🚇 ${escHtml2(String(nm))} · 직선 약 ${Math.round(Number(dist))}m`
+        : '🚇 인근 역 허브';
+    const line2 = pxNum != null
+        ? `역세권 프록시 ${pxNum}/100${wtxt}`
+        : `유동 규모 ${escHtml2(band)}${wtxt}`;
+    const subReason = rec.subway_blend_meta && rec.subway_blend_meta.reason;
+    const footFar = subReason === 'subway_far_hub'
+        ? ` · 직선 약 3.5km 밖은 종합 점수 블렌딩에서 제외, 역 유동 구간만 참고`
+        : '';
+    return `
+        <div class="rc-subway-block">
+            <div class="rc-subway-head">
+                <span class="rc-subway-badge" title="오아시스 ES1007BD">역세권 유동</span>
+            </div>
+            <div class="rc-subway-lines">${line1}</div>
+            <div class="rc-subway-lines rc-subway-lines--sub">${line2}</div>
+            ${pxNum != null ? `<div class="rc-trend-bar rc-subway-bar" aria-hidden="true"><div class="rc-trend-bar__fill rc-subway-bar__fill" style="width:${barW}%"></div></div>` : ''}
+            <div class="rc-subway-foot">전국 역 단위 기준 ${escHtml2(band)} 구간${footFar}</div>
+        </div>`;
+}
+
 function stage2GradeColor(grade) {
     const g = String(grade || '').toUpperCase();
     if (g === 'S') return '#059669';
     if (g === 'A') return '#2563eb';
     if (g === 'B') return '#d97706';
     return '#64748b';
+}
+
+/** SNS·유동 정규화(0~1) → 딥블루→코랄 그라데이션 (히트맵 느낌) */
+function stage2TrendHeatColor(norm) {
+    if (norm == null || norm === undefined || Number.isNaN(Number(norm))) return null;
+    const t = Math.max(0, Math.min(1, Number(norm)));
+    const h = 220 - t * 198;
+    const s = 70 + t * 10;
+    const l = 34 + t * 12;
+    return `hsl(${Math.round(h)}, ${Math.round(s)}%, ${Math.round(l)}%)`;
 }
 
 function clearRetailListingsOnMap() {
@@ -1861,10 +2400,15 @@ function renderStage2FullReport(payload) {
     const top = payload.top_buildings || [];
     if (!top.length) {
         sec.style.display = 'block';
+        sec.classList.remove('is-collapsed');
         head.innerHTML = '<p class="stage2-err">2단계 후보가 없습니다. API·키·권역 좌표를 확인하세요.</p>';
         cardBox.innerHTML = '';
         compareHost.innerHTML = '';
         if (toolbar) toolbar.style.display = 'none';
+        const ph0 = document.getElementById('results-phase-actions');
+        if (ph0) ph0.style.display = 'none';
+        resultsStage2PanelVisible = true;
+        syncResultsPhasePeekRestores();
         return;
     }
     const meta = `후보 ${payload.candidates_evaluated || 0}개 평가 → 상위 ${top.length}곳 · 권역 ${payload.regions_used || '-'}개 · 미시 반경 ${payload.eval_radius_m || '-'}m · ${escHtml2(payload.department || '')}`;
@@ -1882,18 +2426,44 @@ function renderStage2FullReport(payload) {
         <p class="stage2-note">${meta}</p>
         ${pickExtra}
         ${focusNote}
-        <p class="stage2-note stage2-note--emphasis" style="margin-top:8px;line-height:1.5;">아래 <b>표에서 후보를 한눈에 비교</b>할 수 있습니다. 행·말풍선·후보 근처 <b>맵 탭</b>으로 <b>8층 건물 상승·경쟁·추천 층</b> 요약이 뜨고, 카드에서 <b>로드뷰·매물</b>로 이어갈 수 있습니다.</p>
-        <p class="stage2-note" style="margin-top:6px;">${escHtml2(payload.disclaimer || '')}</p>`;
+        <details class="stage2-head-details no-print"><summary class="stage2-head-details-sum">표·맵 탭 안내</summary>
+        <p class="stage2-note stage2-note--emphasis" style="margin-top:6px;line-height:1.45;">표·말풍선·<b>맵 탭</b>에서 층·경쟁·추천 층 요약 · 로드뷰·매물 연결.</p></details>
+        <p class="stage2-note" style="margin-top:4px;">${escHtml2(payload.disclaimer || '')}</p>`;
     compareHost.innerHTML = buildStage2CompareTableHtml(top, payload, { light: false, omitCaption: true });
     cardBox.innerHTML = '';
     if (toolbar) toolbar.style.display = 'flex';
+    sec.classList.remove('is-collapsed');
     sec.style.display = 'block';
+    resultsStage2PanelVisible = true;
+    const ph = document.getElementById('results-phase-actions');
+    if (ph) ph.style.display = 'flex';
     syncReportStage2Cta();
+    syncResultsPhasePeekRestores();
     /* scrollIntoView는 패널 내부 스크롤을 밀어 헤더(닫기)가 화면 밖으로 나감 → 상단으로만 리셋 */
     try {
         const slide = document.querySelector('.results-panel-slide');
         if (slide) slide.scrollTop = 0;
     } catch (_) { /* ignore */ }
+
+    if (
+        top.length > 0
+        && !_autoReportModalOpenedForCurrentMacro
+        && Array.isArray(currentAnalysisData)
+        && currentAnalysisData.length > 0
+    ) {
+        _autoReportModalOpenedForCurrentMacro = true;
+        setTimeout(() => {
+            try {
+                const rp = document.getElementById('results-panel');
+                const modal = document.getElementById('report-modal');
+                if (!rp || rp.style.display === 'none') return;
+                if (modal && modal.style.display === 'flex') return;
+                const ri = lastStage2ReportModalIndex;
+                const idx = Number.isFinite(ri) && ri >= 0 && ri < currentAnalysisData.length ? ri : 0;
+                if (typeof openReportModal === 'function') openReportModal(idx);
+            } catch (_) { /* ignore */ }
+        }, 700);
+    }
 }
 
 /** 2단계 후보: 도로·횡단보도·건물 블록이 보이도록 최대한 확대 (카카오 레벨 숫자↓ = 배율↑) */
@@ -1993,6 +2563,10 @@ async function runStage2BuildingPickActual() {
             );
             return;
         }
+        {
+            const ri = base.findIndex((r) => r.rank === nearest.rank);
+            lastStage2ReportModalIndex = ri >= 0 ? ri : 0;
+        }
         const pr = nearest.rank != null ? Number(nearest.rank) : 1;
         nodes = [{
             lat: alat,
@@ -2012,6 +2586,20 @@ async function runStage2BuildingPickActual() {
         if (!list.length) {
             alert('1단계 권역을 찾을 수 없습니다. Top 5 카드에서「이 권역 2단계 분석」을 누르거나, 정밀 리포트를 연 뒤 2단계를 실행해 주세요.');
             return;
+        }
+        if (snap && snap.card_index != null) {
+            const ci = Number(snap.card_index);
+            if (Number.isFinite(ci) && ci >= 0 && ci < base.length) {
+                lastStage2ReportModalIndex = ci;
+            } else {
+                const hit = list[0];
+                const ri = base.findIndex((r) => r.rank === hit.rank && r.name === hit.name);
+                lastStage2ReportModalIndex = ri >= 0 ? ri : 0;
+            }
+        } else {
+            const hit = list[0];
+            const ri = base.findIndex((r) => r.rank === hit.rank && r.name === hit.name);
+            lastStage2ReportModalIndex = ri >= 0 ? ri : 0;
         }
         nodes = list.map((rec) => ({
             lat: rec.lat,
@@ -2034,6 +2622,7 @@ async function runStage2BuildingPickActual() {
     const compareHost = document.getElementById('stage2-compare-table-host');
     const toolbar = document.getElementById('stage2-toolbar');
     if (sec && head) {
+        sec.classList.remove('is-collapsed');
         sec.style.display = 'block';
         head.innerHTML = '<p class="stage2-note stage2-note--emphasis" style="margin:0;">2단계 분석 중… (최대 1~2분) · 지도에 곧 후보 핀이 표시됩니다.</p>';
         if (cardBox) cardBox.innerHTML = '';
@@ -2301,6 +2890,7 @@ window.triggerStage2FromStage1Card = async function (index) {
         rank: rec.rank,
         name: rec.name,
         region_name: rec.name,
+        card_index: index,
     };
     pendingAfterPaymentAction = 'stage2';
     updatePaymentModalCopyStage2FromCard(rec);
@@ -2505,7 +3095,10 @@ function renderMapAndResults(data, searchRadius) {
         if (ap) ap.classList.remove('hidden-mode');
         try { syncAnalysisDockSummary(); } catch (_) { /* ignore */ }
         const container = document.getElementById('results-cards-container');
-        if (container) container.innerHTML = '';
+        if (container) {
+            container.innerHTML = '';
+            container.classList.remove('results-card-slider--stage1-five');
+        }
         currentAnalysisData = [];
         currentHospitals = [];
         scheduleSyncStage2MapCenterCta();
@@ -2524,7 +3117,10 @@ function renderMapAndResults(data, searchRadius) {
         if (ap0) ap0.classList.remove('hidden-mode');
         try { syncAnalysisDockSummary(); } catch (_) { /* ignore */ }
         const container = document.getElementById('results-cards-container');
-        if (container) container.innerHTML = '';
+        if (container) {
+            container.innerHTML = '';
+            container.classList.remove('results-card-slider--stage1-five');
+        }
         scheduleSyncStage2MapCenterCta();
         return;
     }
@@ -2594,7 +3190,9 @@ function renderMapAndResults(data, searchRadius) {
 
     const container = document.getElementById('results-cards-container');
     let cardsHtml = '';
-    
+
+    resetResultsPhasePanelsState();
+
     currentAnalysisData.forEach((rec, index) => {
         const circle = new kakao.maps.Circle({
             center: new kakao.maps.LatLng(rec.lat, rec.lng), radius: searchRadius * 1000, 
@@ -2609,13 +3207,25 @@ function renderMapAndResults(data, searchRadius) {
         });
         badgeOverlay.setMap(map); mapObjects.push(badgeOverlay);
 
-        // 🚀 [추가] 부동산 임대료 및 상권 소비력 뼈대 로직
-        let baseRent = Math.floor((rec.score_val || 6.0) * 1.5) * 10000; 
-        if (baseRent < 50000) baseRent = 50000;
-        let rentText = `평당 약 ${(baseRent / 10000).toFixed(1)}만원`;
-
-        let spending = Math.floor(Math.random() * 3 + 4) * 10000; 
-        let spendingText = `건당 약 ${(spending / 10000).toFixed(1)}만원`;
+        // 임대·소비: 백엔드 premium_data(추정식) 우선. 없을 때만 카드용 단순 휴리스틱(허위 난수 제거).
+        const prem = rec.premium_data || {};
+        const rentBack = prem.rent != null ? Number(prem.rent) : NaN;
+        const spendBack = prem.spending != null ? Number(prem.spending) : NaN;
+        let rentText;
+        if (!Number.isNaN(rentBack) && rentBack > 0) {
+            rentText = `평당 약 ${(rentBack / 10000).toFixed(1)}만원 (추정)`;
+        } else {
+            let baseRent = Math.floor((rec.score_val || 6.0) * 1.5) * 10000;
+            if (baseRent < 50000) baseRent = 50000;
+            rentText = `평당 약 ${(baseRent / 10000).toFixed(1)}만원 (휴리스틱)`;
+        }
+        let spendingText;
+        if (!Number.isNaN(spendBack) && spendBack > 0) {
+            spendingText = `지수 약 ${(spendBack / 10000).toFixed(1)}만원대 (추정)`;
+        } else {
+            const idx = Math.min(12, Math.max(3, Math.round((rec.score_val || 6) * 1.1)));
+            spendingText = `지수 환산 약 ${idx}만원대 (휴리스틱)`;
+        }
 
         const scoreStr = String(rec.score || '');
         const scoreSplit = scoreStr.split('/');
@@ -2625,7 +3235,7 @@ function renderMapAndResults(data, searchRadius) {
         <div class="result-card result-card--compact" style="border-top: 4px solid ${rec.color};" onclick="panMapToNode(${rec.lat}, ${rec.lng})">
             <div class="rc-top">
                 <div class="rc-rank" style="background:${rec.color};">${rec.rank}</div>
-                <div class="rc-title" style="font-size:15px;">${rec.name}</div>
+                <div class="rc-title">${rec.name}</div>
             </div>
             <div class="rc-meta-badge" title="권역 요약"><span aria-hidden="true">◆</span> ${rec.comp_text || '경쟁 요약'}</div>
             <div class="rc-score-hero">
@@ -2634,6 +3244,10 @@ function renderMapAndResults(data, searchRadius) {
                     <span class="rc-score-hero__value" style="color:${rec.color};">${scoreNum}<span class="rc-score-hero__suffix">${scoreDenom}</span></span>
                 </div>
             </div>
+            ${formatStage1TrendBlock(rec)}
+            ${formatStage1SubwayBlock(rec)}
+            ${formatStage1VitalityBlock(rec)}
+            ${formatStage1RetailSupplyBlock(rec)}
             <div class="rc-info-row">
                 <span class="rc-label">경쟁 강도</span>
                 <span class="rc-value" style="color:var(--text-main);">${rec.comp_text}</span>
@@ -2649,7 +3263,7 @@ function renderMapAndResults(data, searchRadius) {
                     <span class="premium-value">${rentText}</span>
                 </div>
                 <div class="premium-item">
-                    <span class="premium-label">타겟 월평균 의료소비</span>
+                    <span class="premium-label">소비력 추정 지수</span>
                     <span class="premium-value">${spendingText}</span>
                 </div>
             </div>
@@ -2661,6 +3275,12 @@ function renderMapAndResults(data, searchRadius) {
     });
     
     container.innerHTML = cardsHtml;
+    container.classList.toggle('results-card-slider--stage1-five', currentAnalysisData.length === 5);
+    const scrollHint = document.getElementById('results-card-scroll-hint');
+    if (scrollHint) {
+        const n = currentAnalysisData.length;
+        scrollHint.style.display = (n > 2 && n !== 5) ? 'block' : 'none';
+    }
 
     if (currentAnalysisData.length > 0) {
         panMapToNode(currentAnalysisData[0].lat, currentAnalysisData[0].lng);
@@ -2697,6 +3317,7 @@ window.panMapToNode = function(lat, lng) {
 
 async function startAnalysis() {
     if (!map) return;
+    _autoReportModalOpenedForCurrentMacro = false;
     const cta = document.getElementById('stage2-map-center-cta');
     if (cta) cta.classList.remove('is-visible');
     const apDock = document.getElementById('analysis-panel');
@@ -2860,21 +3481,110 @@ function renderHoverHospitals(hospitals) {
         overlay.setMap(map);
         hoverMarkers.push(overlay);
         const displayName = h.display_name || h.name || '의료기관';
-        const tags = (h.fact_tags || []).map(t => `<span style="background:#e0e7ff; color:#4338ca; font-size:10px; padding:2px 6px; border-radius:4px; margin-right:4px;">${t}</span>`).join('');
-        const infoContent = `<div style="padding:12px; border-radius:10px; background:white; border:1px solid #e2e8f0; box-shadow:0 8px 20px rgba(0,0,0,0.15); min-width:220px; font-size:13px;">
-            <div style="font-weight:800; color:#0f172a; margin-bottom:6px;">${displayName}</div>
-            ${tags ? `<div style="margin-bottom:6px;">${tags}</div>` : ''}
-            <div style="font-size:11px; color:#64748b;">${h.hours || ''} ${h.staff_count != null ? '· 직원 ' + h.staff_count + '명' : ''}</div>
-            ${h.estimated_revenue ? `<div style="color:#10B981; font-weight:700; margin-top:4px;">${h.estimated_revenue}</div>` : ''}
-        </div>`;
-        const infoOverlay = new kakao.maps.CustomOverlay({ content: infoContent, position: hPos, yAnchor: 1.3, zIndex: 250 });
+        const tags = (h.fact_tags || []).map(t => `<span style="background:#e0e7ff; color:#4338ca; font-size:10px; padding:2px 6px; border-radius:4px; margin-right:4px;">${escHtml2(t)}</span>`).join('');
+        const sid = _competitorSafeDomId(h);
+        const rootId = `comp-profile-root-${sid}`;
+        const canvasId = `comp-profile-radar-${sid}`;
+        const loadingHtml = `
+            <div id="${rootId}" class="competitor-profile-card">
+                <div class="competitor-profile-card__title">${escHtml2(displayName)}</div>
+                ${tags ? `<div class="competitor-profile-card__fact-tags">${tags}</div>` : ''}
+                <p class="competitor-profile-card__loading-msg">입지 신호 분석 중…</p>
+            </div>`;
+        const infoOverlay = new kakao.maps.CustomOverlay({ content: loadingHtml, position: hPos, yAnchor: 1.3, zIndex: 250 });
         let isOpened = false;
+        let analysisRequestId = 0;
+
+        function fillCompetitorCardFromAnalysis(analysis, errMsg) {
+            const root = document.getElementById(rootId);
+            if (!root) return;
+            const badges = (analysis && analysis.badges) || [];
+            const badgeHtml = badges.length
+                ? `<div class="competitor-profile-card__badges">${badges.map((b) => `<span class="competitor-profile-card__badge">${escHtml2(b)}</span>`).join('')}</div>`
+                : '';
+            const narr = analysis && analysis.narrative_ko ? escHtml2(analysis.narrative_ko) : '';
+            const fp = analysis && analysis.fpop;
+            const fpLine = fp && (fp.percentile_within_dong != null || fp.weighted_0_100 != null)
+                ? `<div class="competitor-profile-card__metrics">`
+                    + (fp.percentile_within_dong != null
+                        ? `<span>동내 격자 상위 <strong>${escHtml2(String(fp.percentile_within_dong))}%</strong></span>`
+                        : '')
+                    + (fp.weighted_0_100 != null
+                        ? `<span>과목가중 유동 <strong>${escHtml2(String(fp.weighted_0_100))}</strong>/100</span>`
+                        : '')
+                    + `</div>`
+                : '';
+            const walk = analysis && analysis.walk_network;
+            const walkLine = walk && !walk.postgis_skipped && walk.min_vertex_dist_m != null
+                ? `<div class="competitor-profile-card__walk-hint">도보 네트워크 노드 최단 <strong>${Math.round(walk.min_vertex_dist_m)}m</strong> · 최대 차수 <strong>${walk.max_vertex_degree != null ? walk.max_vertex_degree : '—'}</strong></div>`
+                : (walk && walk.postgis_skipped
+                    ? `<div class="competitor-profile-card__walk-hint competitor-profile-card__walk-hint--muted">PostGIS 미연결: 교차로·밀착은 추정치</div>`
+                    : '');
+            const errBlock = errMsg
+                ? `<p class="competitor-profile-card__err">${escHtml2(errMsg)}</p>`
+                : '';
+            const radarBlock = !errMsg && analysis && analysis.radar
+                ? `<div class="competitor-profile-card__radar"><canvas id="${canvasId}" width="240" height="240" aria-label="후보 대비 입지 레이더"></canvas></div>`
+                : '';
+            root.innerHTML = `
+                <div class="competitor-profile-card__title">${escHtml2(displayName)}</div>
+                ${tags ? `<div class="competitor-profile-card__fact-tags">${tags}</div>` : ''}
+                ${badgeHtml}
+                ${radarBlock}
+                ${fpLine}
+                ${walkLine}
+                ${narr ? `<p class="competitor-profile-card__narr">${narr}</p>` : ''}
+                <div style="font-size:11px; color:#64748b; margin-top:8px;">${escHtml2(h.hours || '')} ${h.staff_count != null ? '· 직원 ' + escHtml2(String(h.staff_count)) + '명' : ''}</div>
+                ${h.estimated_revenue ? `<div class="competitor-profile-card__rev">${escHtml2(String(h.estimated_revenue))}</div>` : ''}
+                ${Array.isArray(h.revenue_scenarios) && h.revenue_scenarios.length
+                    ? `<div class="competitor-profile-card__scenarios" role="region" aria-label="컨셉별 매출 구간">`
+                    + `<div class="competitor-profile-card__scenarios-title">컨셉별 추정 구간(동일 입지·모형)</div>`
+                    + h.revenue_scenarios.map((s) => `<div class="competitor-profile-card__scenario-row"><span class="competitor-profile-card__scenario-label">${escHtml2(String(s.label_ko || ''))}</span><span class="competitor-profile-card__scenario-band">${escHtml2(String(s.monthly_band_ko || ''))} · ${escHtml2(String(s.annual_band_ko || ''))}</span></div>`).join('')
+                    + `<div class="competitor-profile-card__scenarios-foot">※ 심평원 기본목록·상호·신고 병상 등 공개 신호 기반 추정이며 실매출과 다를 수 있습니다.</div></div>`
+                    : ''}
+                ${errBlock}
+                <div class="competitor-profile-card__foot">※ 교차로·횡단보도는 OSM 도보그래프 기반 <strong>프록시</strong>이며 현장과 다를 수 있습니다.</div>
+            `;
+            if (!errMsg && analysis && analysis.radar) {
+                const cv = document.getElementById(canvasId);
+                requestAnimationFrame(() => renderCompetitorProfileRadar(cv, analysis));
+            }
+        }
+
         setTimeout(() => {
             const el = overlay.a;
             if (el) el.addEventListener('click', () => {
                 infoWindows.forEach(iw => iw.setMap(null));
-                if (!isOpened) { infoOverlay.setMap(map); isOpened = true; infoWindows.push(infoOverlay); map.panTo(hPos); }
-                else { infoOverlay.setMap(null); isOpened = false; }
+                destroyCompetitorProfileRadarChart();
+                if (!isOpened) {
+                    analysisRequestId += 1;
+                    const req = analysisRequestId;
+                    infoOverlay.setContent(loadingHtml);
+                    infoOverlay.setMap(map);
+                    isOpened = true;
+                    infoWindows.push(infoOverlay);
+                    map.panTo(hPos);
+                    fetchCompetitorAnalysisForMarker(h)
+                        .then((data) => {
+                            if (req !== analysisRequestId) return;
+                            fillCompetitorCardFromAnalysis(data, null);
+                        })
+                        .catch((e) => {
+                            if (req !== analysisRequestId) return;
+                            const fallback = {
+                                badges: ['#입지_분석'],
+                                narrative_ko: '백엔드 분석을 불러오지 못했습니다. 기본 정보만 표시합니다.',
+                                radar: null,
+                                fpop: null,
+                                walk_network: null,
+                            };
+                            fillCompetitorCardFromAnalysis(fallback, (e && e.message) ? String(e.message) : '오류');
+                        });
+                } else {
+                    infoOverlay.setMap(null);
+                    isOpened = false;
+                    destroyCompetitorProfileRadarChart();
+                }
             });
         }, 100);
     });
@@ -2952,11 +3662,13 @@ function teardownHoverHospitalFetch() {
     }
     if (hoverFetchTimer) { clearTimeout(hoverFetchTimer); hoverFetchTimer = null; }
     clearHoverMarkers();
+    destroyCompetitorProfileRadarChart();
     const toast = document.getElementById('hover-loading-toast');
     if (toast) toast.style.display = 'none';
 }
 
 function closeResults() {
+    resetResultsPhasePanelsState();
     document.getElementById('results-panel').style.display = 'none';
     const ap = document.getElementById('analysis-panel');
     if (ap) {
@@ -3221,6 +3933,15 @@ function openReportModal(index) {
     const rev = parseScore(f.revenue_score);
     const anc = parseScore(f.anchor_score);
 
+    const macroBase = f.macro_base_score;
+    const trendWb = f.trend_sns_whitebox;
+    const trendNarr = rec.trend_narrative_ko;
+    const subwayWb = f.subway_hub_whitebox;
+    const subwayNarr = rec.subway_narrative_ko;
+    const vitWb = f.vitality_whitebox;
+    const vitNarr = rec.vitality_narrative_ko;
+    const retailWb = f.retail_supply_whitebox;
+    const retailNarr = rec.retail_supply_narrative_ko;
     const formulaHtml = `
         <div class="algo-row algo-row--plus"><span class="algo-row__label">기본 상권 베이스 점수 (하한선 보장)</span><span class="algo-row__val">+ 20.0 ~ 30.0점</span></div>
         <div class="algo-row algo-row--plus"><span class="algo-row__label">타겟 연령 최적화 가점 ${age.desc}</span><span class="algo-row__val">${age.val}점</span></div>
@@ -3228,6 +3949,15 @@ function openReportModal(index) {
         <div class="algo-row algo-row--plus"><span class="algo-row__label">교통·유동인구 앵커 가점 ${anc.desc}</span><span class="algo-row__val">${anc.val}점</span></div>
         <div class="algo-row algo-row--minus algo-row--divider-top"><span class="algo-row__label">상권 공실·폐업 리스크 감점</span><span class="algo-row__val">- ${f.risk_penalty || '20.0'}점</span></div>
         <div class="algo-row algo-row--minus"><span class="algo-row__label">동일 과목 레드오션 밀집도 감점</span><span class="algo-row__val">${f.comp_penalty}점</span></div>
+        ${macroBase ? `<div class="algo-row algo-row--plus algo-row--divider-top"><span class="algo-row__label">거시 베이스 (SNS 블렌딩 전)</span><span class="algo-row__val">${escHtml2(String(macroBase))}</span></div>` : ''}
+        ${trendWb ? `<div class="algo-row algo-row--plus algo-row--sns"><span class="algo-row__label">+ 상업 시설 트렌드/SNS 활성도 가점</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(trendWb))}</span></div>` : ''}
+        ${trendNarr ? `<div class="algo-narrative-block">${escHtml2(String(trendNarr))}</div>` : ''}
+        ${subwayWb ? `<div class="algo-row algo-row--plus algo-row--subway"><span class="algo-row__label">+ 지하철 역세권 월간 유동 볼륨 반영</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(subwayWb))}</span></div>` : ''}
+        ${subwayNarr ? `<div class="algo-narrative-block algo-narrative-block--subway">${escHtml2(String(subwayNarr))}</div>` : ''}
+        ${vitWb ? `<div class="algo-row algo-row--plus algo-row--subway"><span class="algo-row__label">+ 도로단위 상권활성도(시군구 집계) 반영</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(vitWb))}</span></div>` : ''}
+        ${vitNarr ? `<div class="algo-narrative-block algo-narrative-block--subway">${escHtml2(String(vitNarr))}</div>` : ''}
+        ${retailWb ? `<div class="algo-row algo-row--plus algo-row--subway"><span class="algo-row__label">· 법정동 상가공급면적(ES1007AC, 참고)</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(retailWb))}</span></div>` : ''}
+        ${retailNarr ? `<div class="algo-narrative-block algo-narrative-block--subway">${escHtml2(String(retailNarr))}</div>` : ''}
     `;
     
     document.getElementById('report-formula-breakdown').innerHTML = formulaHtml;
@@ -3280,6 +4010,15 @@ window.renderReportFromData = function(data) {
     document.getElementById('report-insight-text').innerHTML = `"${rec.insight || ''}"`;
     const f = rec.formula || {};
     const parseScore = (str) => { if (!str) return { val: '+0.0', desc: '' }; const p = String(str).split(' '); return { val: p[0], desc: p[1] || '' }; };
+    const macroBase2 = f.macro_base_score;
+    const trendWb2 = f.trend_sns_whitebox;
+    const trendNarr2 = rec.trend_narrative_ko;
+    const subwayWb2 = f.subway_hub_whitebox;
+    const subwayNarr2 = rec.subway_narrative_ko;
+    const vitWb2 = f.vitality_whitebox;
+    const vitNarr2 = rec.vitality_narrative_ko;
+    const retailWb2 = f.retail_supply_whitebox;
+    const retailNarr2 = rec.retail_supply_narrative_ko;
     const formulaHtml = `
         <div class="algo-row algo-row--plus"><span class="algo-row__label">기본 상권 베이스 점수</span><span class="algo-row__val">+ 20.0 ~ 30.0점</span></div>
         <div class="algo-row algo-row--plus"><span class="algo-row__label">타겟 연령 최적화 ${parseScore(f.age_score).desc}</span><span class="algo-row__val">${parseScore(f.age_score).val}점</span></div>
@@ -3287,6 +4026,15 @@ window.renderReportFromData = function(data) {
         <div class="algo-row algo-row--plus"><span class="algo-row__label">교통·유동 앵커 ${parseScore(f.anchor_score).desc}</span><span class="algo-row__val">${parseScore(f.anchor_score).val}점</span></div>
         <div class="algo-row algo-row--minus algo-row--divider-top"><span class="algo-row__label">리스크 감점</span><span class="algo-row__val">- ${f.risk_penalty || '20.0'}점</span></div>
         <div class="algo-row algo-row--minus"><span class="algo-row__label">경쟁 밀집도 감점</span><span class="algo-row__val">${f.comp_penalty || '0'}점</span></div>
+        ${macroBase2 ? `<div class="algo-row algo-row--plus algo-row--divider-top"><span class="algo-row__label">거시 베이스 (SNS 블렌딩 전)</span><span class="algo-row__val">${escHtml2(String(macroBase2))}</span></div>` : ''}
+        ${trendWb2 ? `<div class="algo-row algo-row--plus algo-row--sns"><span class="algo-row__label">+ 상업 시설 트렌드/SNS 활성도 가점</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(trendWb2))}</span></div>` : ''}
+        ${trendNarr2 ? `<div class="algo-narrative-block">${escHtml2(String(trendNarr2))}</div>` : ''}
+        ${subwayWb2 ? `<div class="algo-row algo-row--plus algo-row--subway"><span class="algo-row__label">+ 지하철 역세권 월간 유동 볼륨 반영</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(subwayWb2))}</span></div>` : ''}
+        ${subwayNarr2 ? `<div class="algo-narrative-block algo-narrative-block--subway">${escHtml2(String(subwayNarr2))}</div>` : ''}
+        ${vitWb2 ? `<div class="algo-row algo-row--plus algo-row--subway"><span class="algo-row__label">+ 도로단위 상권활성도(시군구 집계) 반영</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(vitWb2))}</span></div>` : ''}
+        ${vitNarr2 ? `<div class="algo-narrative-block algo-narrative-block--subway">${escHtml2(String(vitNarr2))}</div>` : ''}
+        ${retailWb2 ? `<div class="algo-row algo-row--plus algo-row--subway"><span class="algo-row__label">· 법정동 상가공급면적(ES1007AC, 참고)</span><span class="algo-row__val algo-row__val--wrap">${escHtml2(String(retailWb2))}</span></div>` : ''}
+        ${retailNarr2 ? `<div class="algo-narrative-block algo-narrative-block--subway">${escHtml2(String(retailNarr2))}</div>` : ''}
     `;
     document.getElementById('report-formula-breakdown').innerHTML = formulaHtml;
     const finalScoreEl = document.getElementById('report-final-score');

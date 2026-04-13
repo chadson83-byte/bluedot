@@ -22,6 +22,32 @@ data/**
 !data/car2024.xlsx
 !data/TAAS_전국_사고건수_최종마스터.xlsx
 !data/법정동코드 전체자료.txt
+!data/ES1007BD00101MM2504_csv.csv
+!data/ES1007AD00101MM2504_csv.csv
+# 공공데이터 포털에서 받은 파일명이 달라도 동일 접두로 포함 (용량 큰 파일 자동 선택은 런타임 import 담당)
+!data/ES1007AD*.csv
+!data/ES1007AD*.CSV
+!data/ES1007BD*.csv
+!data/ES1007BD*.CSV
+# 하위 폴더 배치(data/ES1007AD/, data/es1007AD/, BD 동일) — 부모 디렉터리부터 허용
+!data/ES1007AD/
+!data/ES1007AD/**
+!data/es1007AD/
+!data/es1007AD/**
+!data/ES1007BD/
+!data/ES1007BD/**
+!data/es1007BD/
+!data/es1007BD/**
+!data/ES1013.csv
+!data/ES1013.CSV
+!data/ES1013*.csv
+!data/ES1013*.CSV
+!data/ES1001AY.csv
+!data/ES1001AY.CSV
+!data/ES1007AC*.csv
+!data/ES1007AC*.CSV
+# 전역 *.sqlite 제외를 덮어 MOCT 캐시 포함 (선택)
+!data/moct_network.sqlite
 
 # 마스터 CSV는 v7만 이미지에 포함(v6 로컬 폴백용 중복 제외)
 bluedot_master_v6.csv

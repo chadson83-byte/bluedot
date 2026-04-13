@@ -1,0 +1,22 @@
+# Fly.io 백엔드(프론트 정적 포함) 배포
+# 리포지토리 Secrets 에 FLY_API_TOKEN 등록: https://fly.io/docs/flyctl/tokens/
+name: Deploy to Fly.io
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  deploy:
+    name: fly deploy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
+
+      - name: Deploy app
+        run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}

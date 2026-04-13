@@ -7,7 +7,7 @@ import hashlib
 import requests
 from requests.adapters import HTTPAdapter
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.parse
 import pandas as pd
 import numpy as np
@@ -38,14 +38,23 @@ from engine.killer_insights import (
     enhance_time_matrix_killer,
 )
 from engine.car_insurance_stats import build_car_insurance_insight_for_region
+from engine.revenue_scenarios import build_han_revenue_bundle
 from engine.micro_site import (
     build_micro_site_payload,
     build_region_candidate_scores,
     collect_anchor_pois,
+    dedupe_hospital_markers,
     dedupe_pick_top,
     enrich_stage2_top_with_rationale,
 )
+from engine.sns_floating import build_trend_payload_for_node, enrich_stage2_candidate_trend
 from engine.walkable_phase2 import analyze_location, get_walking_polygon, Phase2Config
+from engine.competitor_analysis import analyze_competitor_location
+from engine.moct_network import (
+    lookup_moct_nearest,
+    moct_macro_score_adjustment,
+    moct_node_row_count,
+)
 from building_analyzer import generate_aging_report
 
 import re
@@ -55,6 +64,212 @@ from engine.bjdong_mapper import DEFAULT_BJDONG_TXT
 app = FastAPI(title="BLUEDOT Backend API - National Flexible Radius Edition")
 
 
+def _build_data_readiness_payload(
+    *,
+    kakao_ok: bool,
+    sns_n: int,
+    subway_n: int,
+    vitality_n: int,
+    kreb_n: int,
+    ac_n: int,
+    moct_n: int,
+    postgis_walk: bool,
+    hira_ok: bool,
+    datagokr_ok: bool,
+    naver_ok: bool,
+) -> Dict[str, Any]:
+    """프론트 배너: 필수(미반영)·권장·선택(정밀도) 분리 + 공식 데이터 파일·API 체크리스트."""
+
+    def _g(
+        code: str,
+        tier: str,
+        severity: str,
+        title_ko: str,
+        action_ko: str,
+    ) -> Dict[str, str]:
+        return {
+            "code": code,
+            "tier": tier,
+            "severity": severity,
+            "title_ko": title_ko,
+            "action_ko": action_ko,
+        }
+
+    blocking: List[Dict[str, str]] = []
+    recommended: List[Dict[str, str]] = []
+    optional: List[Dict[str, str]] = []
+
+    if not kakao_ok:
+        blocking.append(
+            _g(
+                "kakao_rest",
+                "blocking",
+                "high",
+                "서버 KAKAO_REST_KEY 없음",
+                "Fly `fly secrets set KAKAO_REST_KEY=...` (REST 키). 지도 JS키와 다릅니다. "
+                "없으면 법정동 매칭 실패 → 트렌드 유동 카드가 비어 보일 수 있습니다.",
+            )
+        )
+    if sns_n <= 0:
+        blocking.append(
+            _g(
+                "sns_sqlite_empty",
+                "blocking",
+                "high",
+                "SNS·유동 SQLite 테이블 비어 있음 (트렌드 유동성 미반영)",
+                "필수 파일: data/ 의 ES1007AD*.csv (파이프 구분). PDF(ES1007AD90101…pdf)는 사용 안 함. "
+                "`fly deploy`로 이미지에 포함하거나 SSH에서 `python scripts/import_sns_floating_csv.py --db $BLUEDOT_DB_PATH`. "
+                "볼륨 DB가 비어 있으면 fly.toml의 BLUEDOT_AUTOIMPORT_SNS=1 로 기동 시 자동 적재.",
+            )
+        )
+    if subway_n <= 0:
+        recommended.append(
+            _g(
+                "subway_sqlite_empty",
+                "recommended",
+                "medium",
+                "지하철 허브 유동 DB 비어 있음",
+                "필수 파일: data/ ES1007BD*.csv → `import_subway_footfall_csv.py`. PDF는 사용 안 함.",
+            )
+        )
+    if vitality_n <= 0:
+        recommended.append(
+            _g(
+                "vitality_sqlite_empty",
+                "recommended",
+                "medium",
+                "상권활성도 ES1013 미적재",
+                "data/ ES1013*.csv + KAKAO_REST_KEY(시군구 매칭) → `import_commercial_vitality_csv.py`.",
+            )
+        )
+    if not postgis_walk:
+        optional.append(
+            _g(
+                "postgis_walk",
+                "optional",
+                "low",
+                "PostGIS·pgRouting 미연결 (선택)",
+                "없어도 MOCT·프록시로 동작. 보행 교차로를 OSM 그래프로 쓰려면 PostGIS 연결.",
+            )
+        )
+    if moct_n <= 0:
+        optional.append(
+            _g(
+                "moct_sqlite_missing",
+                "optional",
+                "low",
+                "MOCT SQLite 없음 (선택)",
+                "data/moct_network.sqlite + import_moct_nodelink.py — 차량 노드망 보조.",
+            )
+        )
+
+    gaps = blocking + recommended + optional
+    api_requirements = [
+        {
+            "env_var": "KAKAO_REST_KEY",
+            "layer": "server",
+            "required": True,
+            "configured": kakao_ok,
+            "used_for_ko": "좌표→법정동(b_code), 카카오 로컬/주소, 시군구 매칭, 트렌드·상권 블렌딩",
+        },
+        {
+            "env_var": "KAKAO_JS_KEY",
+            "layer": "browser",
+            "required": True,
+            "configured": None,
+            "used_for_ko": "Vercel에 배포된 index.html의 window.KAKAO_JS_KEY — 지도 표시(서버가 알 수 없음)",
+        },
+        {
+            "env_var": "HIRA_API_KEY",
+            "layer": "server",
+            "required": False,
+            "configured": hira_ok,
+            "used_for_ko": "심평원 의료기관·경쟁 마커",
+        },
+        {
+            "env_var": "DATA_GO_KR_SERVICE_KEY 또는 BUILDING_HUB_SERVICE_KEY",
+            "layer": "server",
+            "required": False,
+            "configured": datagokr_ok,
+            "used_for_ko": "건축HUB·건물 파이프라인",
+        },
+        {
+            "env_var": "NAVER_CLIENT_ID + NAVER_CLIENT_SECRET",
+            "layer": "server",
+            "required": False,
+            "configured": naver_ok,
+            "used_for_ko": "네이버 로컬 POI 병합(미설정 시 카카오만)",
+        },
+    ]
+    data_files_checklist = [
+        {
+            "id": "es1007ad",
+            "filename_hint_ko": "ES1007AD*.csv (오아시스 SNS·유동)",
+            "engine_uses": True,
+            "sqlite_table": "sns_floating_population",
+            "row_count": int(sns_n),
+            "note_ko": "동일 접두 CSV만 적재. *90101*pdf 등 설명용 PDF는 엔진 미사용.",
+        },
+        {
+            "id": "es1007bd",
+            "filename_hint_ko": "ES1007BD*.csv (역 허브 유동)",
+            "engine_uses": True,
+            "sqlite_table": "subway_station_footfall",
+            "row_count": int(subway_n),
+            "note_ko": "PDF 미사용.",
+        },
+        {
+            "id": "es1013",
+            "filename_hint_ko": "ES1013*.csv (상권활성도)",
+            "engine_uses": True,
+            "sqlite_table": "commercial_vitality_road",
+            "row_count": int(vitality_n),
+            "note_ko": None,
+        },
+        {
+            "id": "es1001ay",
+            "filename_hint_ko": "ES1001AY.csv (부동산원 주요상권 상가영업)",
+            "engine_uses": True,
+            "sqlite_table": "trade_area_retail_kreb",
+            "row_count": int(kreb_n),
+            "note_ko": "ES1013 미적재·미매칭 시 상권활성도 보조. import_es1001ay_csv.py",
+        },
+        {
+            "id": "es1007ac",
+            "filename_hint_ko": "ES1007AC*.csv (유동인구 상가공급·인당 면적)",
+            "engine_uses": True,
+            "sqlite_table": "oasis_retail_supply_ac",
+            "row_count": int(ac_n),
+            "note_ko": "점수 블렌딩 없음. 동 단위 참고 지표. import_es1007ac_csv.py",
+        },
+    ]
+    return {
+        "gaps": gaps,
+        "gap_count": len(gaps),
+        "blocking_gaps": blocking,
+        "recommended_gaps": recommended,
+        "optional_gaps": optional,
+        "blocking_count": len(blocking),
+        "recommended_count": len(recommended),
+        "optional_count": len(optional),
+        "api_requirements": api_requirements,
+        "data_files_checklist": data_files_checklist,
+        "pdf_files_note_ko": (
+            "공공데이터 포털에서 같이 받은 ES1007AD90101…pdf, ES1007BD90101…pdf 는 **데이터 명세서**일 뿐이며 "
+            "BLUEDOT 백엔드는 **CSV만** 읽습니다. PDF를 넣어도 수치에 반영되지 않습니다."
+        ),
+        "pc_data_folder_note_ko": (
+            "PC의 data/에 CSV가 있어도 **Fly/Vercel API 서버의 SQLite**에 import·배포되지 않으면 화면은 미반영입니다. "
+            "`fly deploy` 또는 SSH에서 import 스크립트 실행."
+        ),
+        "model_outputs_note_ko": (
+            "랭킹·월 추정 등은 모형 산출입니다. 공개되지 않는 실매출·실유동은 프록시만 가능합니다."
+        ),
+        "all_clear": len(blocking) == 0 and len(recommended) == 0 and len(optional) == 0,
+        "data_pipeline_ok": len(blocking) == 0,
+    }
+
+
 @app.get("/api/health")
 def api_health():
     """프론트·배포 점검용 — 200이면 API 서버 정상."""
@@ -62,12 +277,37 @@ def api_health():
     bjdong_ok = os.path.isfile(DEFAULT_BJDONG_TXT)
     bjdong_sz = os.path.getsize(DEFAULT_BJDONG_TXT) if bjdong_ok else 0
     dg = (os.getenv("DATA_GO_KR_SERVICE_KEY") or os.getenv("BUILDING_HUB_SERVICE_KEY") or "").strip()
+    kakao_ok = bool(os.getenv("KAKAO_REST_KEY", "").strip())
+    hira_ok = bool(os.getenv("HIRA_API_KEY", "").strip())
+    naver_ok = bool(
+        (os.getenv("NAVER_CLIENT_ID") or "").strip() and (os.getenv("NAVER_CLIENT_SECRET") or "").strip()
+    )
+    sns_n = db.sqlite_table_row_count("sns_floating_population")
+    subway_n = db.sqlite_table_row_count("subway_station_footfall")
+    vitality_n = db.sqlite_table_row_count("commercial_vitality_road")
+    kreb_n = db.sqlite_table_row_count("trade_area_retail_kreb") or 0
+    ac_n = db.sqlite_table_row_count("oasis_retail_supply_ac") or 0
+    moct_n = moct_node_row_count()
+    postgis_walk = bool(p2.use_pgr_network)
+    data_readiness = _build_data_readiness_payload(
+        kakao_ok=kakao_ok,
+        sns_n=sns_n,
+        subway_n=subway_n,
+        vitality_n=vitality_n,
+        kreb_n=int(kreb_n),
+        ac_n=int(ac_n),
+        moct_n=moct_n,
+        postgis_walk=postgis_walk,
+        hira_ok=hira_ok,
+        datagokr_ok=bool(dg),
+        naver_ok=naver_ok,
+    )
     return {
         "ok": True,
         "service": "bluedot",
         "docs": "/docs",
         "features": {
-            "postgis_walking_polygon": bool(p2.use_pgr_network),
+            "postgis_walking_polygon": postgis_walk,
             "fly": bool(os.getenv("FLY_APP_NAME", "").strip()),
         },
         "building_pipeline": {
@@ -76,7 +316,7 @@ def api_health():
             "bjdong_txt_basename": os.path.basename(DEFAULT_BJDONG_TXT),
             "hira_key_from_env": bool(os.getenv("HIRA_API_KEY", "").strip()),
             "data_go_building_key_from_env": bool(dg),
-            "kakao_rest_key_from_env": bool(os.getenv("KAKAO_REST_KEY", "").strip()),
+            "kakao_rest_key_from_env": kakao_ok,
             "naver_local_key_from_env": bool(
                 (os.getenv("NAVER_CLIENT_ID") or "").strip()
                 and (os.getenv("NAVER_CLIENT_SECRET") or "").strip()
@@ -99,6 +339,40 @@ def api_health():
             "db_file": os.path.basename(getattr(db, "DB_PATH", "bluedot.db")),
             "fly_volume_style_path": str(getattr(db, "DB_PATH", "")).startswith("/data/"),
         },
+        "oasis_sqlite_rows": {
+            "sns_floating_population": sns_n,
+            "subway_station_footfall": subway_n,
+            "commercial_vitality_road": vitality_n,
+            "trade_area_retail_kreb": kreb_n,
+            "oasis_retail_supply_ac": ac_n,
+            "hint": (
+                "0이면 Fly 볼륨 DB에 CSV 미적재입니다. "
+                "서버에서 import 스크립트 실행 또는 BLUEDOT_AUTOIMPORT_SNS=1 후 재기동. "
+                "SNS·상권활성도는 KAKAO_REST_KEY(coord2address)도 필요합니다."
+            ),
+            "fly_remote_check_ko": (
+                "Fly DB 행 수: `fly ssh console -a <앱> -C \"python /app/database.py\"` "
+                "(-C 는 셸이 아니므로 cd && 사용 불가) 또는 /api/health 의 oasis_sqlite_rows."
+            ),
+        },
+        "moct_network": {
+            "moct_nodes_loaded": moct_n,
+            "hint": (
+                "0이면 data/moct_network.sqlite 없음. "
+                "로컬에서 `python scripts/import_moct_nodelink.py` 실행 후 파일을 배포 경로에 두면 "
+                "1·2단계·경쟁사 분석에 국가 노드·링크가 반영됩니다."
+            ),
+        },
+        "hospitals_analysis_cache": {
+            "schema_version": _HOSPITALS_ANALYSIS_CACHE_SCHEMA,
+            "ttl_sec": _HOSPITALS_ANALYSIS_TTL,
+            "hint_ko": (
+                "분석 응답은 메모리에 잠시 캐시됩니다. DB·카카오는 정상인데 카드만 옛날이면 "
+                "스키마 버전 올린 배포 직후이거나 TTL(초) 안의 구응답일 수 있습니다. "
+                "필요 시 BLUEDOT_HOSPITALS_CACHE_TTL_SEC=0 으로 끄거나 잠시 후 재시도."
+            ),
+        },
+        "data_readiness": data_readiness,
     }
 
 
@@ -118,6 +392,41 @@ def _startup_building_pipeline_warn():
 
 # DB 초기화
 db.init_db()
+
+
+def _startup_oasis_seed_background() -> None:
+    """볼륨이 빈 첫 기동 시 지하철 CSV 자동 적재. SNS 대용량은 BLUEDOT_AUTOIMPORT_SNS=1 일 때만."""
+
+    def _job() -> None:
+        import subprocess
+        import sys
+
+        try:
+            root = os.path.dirname(os.path.abspath(__file__))
+            script = os.path.join(root, "scripts", "seed_oasis_if_empty.py")
+            env = os.environ.copy()
+            env["BLUEDOT_DB_PATH"] = str(db.DB_PATH)
+            subprocess.run([sys.executable, script], cwd=root, env=env, check=False, timeout=3600)
+            from engine.sns_floating import invalidate_stats_cache
+            from engine.subway_floating import invalidate_subway_cache
+
+            invalidate_stats_cache()
+            invalidate_subway_cache()
+            try:
+                from engine.commercial_vitality import invalidate_vitality_cache
+
+                invalidate_vitality_cache()
+            except Exception:
+                pass
+        except Exception as e:
+            logging.warning("Oasis CSV seed (background): %s", e)
+
+    threading.Thread(target=_job, name="oasis-seed", daemon=True).start()
+
+
+@app.on_event("startup")
+def _startup_oasis_csv_seed():
+    _startup_oasis_seed_background()
 
 
 def _require_listings_ingest_key(x_listings_ingest_key: Optional[str] = Header(None, alias="X-Listings-Ingest-Key")) -> bool:
@@ -257,6 +566,39 @@ def _docs_per_10k_column(df: pd.DataFrame) -> pd.Series:
     pop = df["pop_in_10k"].astype(float)
     doc = df["dept_doctors"].astype(float)
     return pd.Series(np.where(pop > 0, doc / pop, 5.0), index=df.index)
+
+
+def _format_population_line(row: dict) -> Tuple[str, List[str]]:
+    """
+    마스터 CSV의 인구·젊은층 비중 표기.
+    bluedot_master_v7 등이 `make_master_nationwide`로 만들어졌고 행정동별_인구_실데이터.csv 가 없으면
+    총인구가 8만 상한(clip)에 걸린 추정치일 수 있음 → UI에 경고용 코드 반환.
+    """
+    caveats: List[str] = []
+    try:
+        pop = float(row.get("총인구 (명)", 0) or 0)
+    except (TypeError, ValueError):
+        pop = 0.0
+    try:
+        young = float(row.get("젊은층_비중", 0.25) or 0)
+    except (TypeError, ValueError):
+        young = 0.25
+    young = max(0.0, min(1.0, young))
+    pi = int(round(pop))
+    line = f"{pi:,}명 (3040비중 {young * 100:.1f}%)"
+    if pi >= 79_999:
+        caveats.append("population_hit_master_80k_cap")
+        line += " · ⚠ 인구 추정 상한(8만) 도달 — 통계청 행정동 인구 CSV 병합 권장"
+    elif pi >= 75_000 and abs(young - 0.2) < 0.001:
+        caveats.append("population_suspect_default_young_ratio")
+        line += " · ⚠ 젊은층 비중 기본값(0.2) 패턴 — 실인구 데이터 확인 권장"
+    return line, caveats
+
+
+def _competition_summary_line(status: str, row: dict) -> str:
+    """hosp_count = 행정동 전체 의료기관 수(병원정보서비스 집계). '경쟁 심화' 등 상태는 과목 전문의/만인 기준."""
+    n = int(row.get("hosp_count", 0) or 0)
+    return f"{status} (행정동 전체 의료기관 {n}곳)"
 
 
 def _hira_cache_ttl_seconds() -> float:
@@ -959,17 +1301,42 @@ def get_dummy_hospitals(lat: float, lng: float, radius: int, dept: str, count: i
             hours_tag = "🕒 주 6일/평일야간 (공동개원)"
         else:
             hours_tag = "🕒 일반 진료시간 (1인원장)"
-        
-        rev_str, detail_label, rev_man = _hospital_revenue_and_detail(
-            doctor_count,
-            staff_count,
-            established_years,
-            dept,
-            extra_mult=1.0,
-            staff_role_label="직원(추정)",
-        )
-        fact_tags = _build_fact_tags(doctor_count, hours_tag, dept)
+
         raw_name = f"경쟁 {dept} (심평원 미수신·참고용)"
+        staff_disp = str(staff_count)
+        if established_years >= 10:
+            _yl = f"{established_years}년차 터줏대감"
+        elif established_years >= 5:
+            _yl = f"{established_years}년차 안정"
+        else:
+            _yl = f"{established_years}년차 신규"
+        dept_dn = _normalize_dept_for_hira(dept)
+        han_dummy: Optional[Dict[str, Any]] = None
+        if dept_dn == "한의원":
+            han_dummy = build_han_revenue_bundle(
+                doctor_count=doctor_count,
+                staff_count=staff_count,
+                established_years=established_years,
+                raw_name=raw_name,
+                hira_item=None,
+                extra_mult=1.0,
+            )
+            rev_str = han_dummy["estimated_revenue"]
+            rev_man = han_dummy["estimated_revenue_man"]
+            detail_label = (
+                f"(의사 {doctor_count}명, 직원(추정) {staff_disp}) | {_yl} | {rev_str}"
+                + han_dummy.get("detail_label_suffix", "")
+            )
+        else:
+            rev_str, detail_label, rev_man = _hospital_revenue_and_detail(
+                doctor_count,
+                staff_count,
+                established_years,
+                dept,
+                extra_mult=1.0,
+                staff_role_label="직원(추정)",
+            )
+        fact_tags = _build_fact_tags(doctor_count, hours_tag, dept)
         display_name = _mask_clinic_name(raw_name, dept)
         did = hashlib.sha256(f"{seed_base}|{i}".encode("utf-8", errors="replace")).hexdigest()[:12]
 
@@ -988,6 +1355,11 @@ def get_dummy_hospitals(lat: float, lng: float, radius: int, dept: str, count: i
             "estimated_revenue_man": rev_man,
             "detail_label": detail_label,
         }
+        if han_dummy is not None:
+            h["revenue_scenarios"] = han_dummy["revenue_scenarios"]
+            h["revenue_archetype"] = han_dummy["revenue_archetype"]
+            h["revenue_fit_monthly_man"] = han_dummy["revenue_fit_monthly_man"]
+            h["revenue_estimate_meta"] = han_dummy["revenue_estimate_meta"]
         enrich_hospital_killer_fields(h, dept)
         dummy_list.append(h)
     return dummy_list
@@ -1149,15 +1521,47 @@ def _hira_fetch_hospitals_once(
         sched_tags = _schedule_tags_from_hira(item)
         combined = float(name_mult) * float(nurse_mult) * float(park_mult) * float(sched_mult)
         combined = max(0.85, min(1.28, combined))
-
-        rev_str, detail_label, rev_man = _hospital_revenue_and_detail(
-            doctor_count,
-            int(staff_count or 0),
-            established_years,
-            dept,
-            extra_mult=combined,
-            staff_role_label="간호·조무 등",
+        # 한의원 시나리오 번들: 토·일·야간은 HIRA Y/N을 revenue_scenarios 쪽에서만 곱함(이중 가산 방지)
+        han_extra_mult = max(
+            0.85,
+            min(1.28, float(name_mult) * float(nurse_mult) * float(park_mult)),
         )
+
+        staff_disp = str(staff_count) if staff_count is not None else "미상"
+        if established_years >= 10:
+            year_label = f"{established_years}년차 터줏대감"
+        elif established_years >= 5:
+            year_label = f"{established_years}년차 안정"
+        else:
+            year_label = f"{established_years}년차 신규"
+
+        dept_n = _normalize_dept_for_hira(dept)
+        han_bundle: Optional[Dict[str, Any]] = None
+        if dept_n == "한의원":
+            han_bundle = build_han_revenue_bundle(
+                doctor_count=doctor_count,
+                staff_count=int(staff_count or 0),
+                established_years=established_years,
+                raw_name=str(raw_name or ""),
+                hira_item=item,
+                extra_mult=han_extra_mult,
+            )
+            rev_str = han_bundle["estimated_revenue"]
+            rev_man = han_bundle["estimated_revenue_man"]
+            detail_label = (
+                f"(의사 {doctor_count}명, 간호·조무 등 {staff_disp}) | {year_label} | {rev_str}"
+                + han_bundle.get("detail_label_suffix", "")
+            )
+        else:
+            rev_str, detail_label, rev_man = _hospital_revenue_and_detail(
+                doctor_count,
+                int(staff_count or 0),
+                established_years,
+                dept,
+                extra_mult=combined,
+                staff_role_label="간호·조무 등",
+            )
+
         display_name = _mask_clinic_name(raw_name, dept)
         extra_tag_list: List[str] = list(kw_tags)
         if park_tag:
@@ -1170,6 +1574,37 @@ def _hira_fetch_hospitals_once(
         npd = None
         if staff_count is not None and doctor_count > 0:
             npd = round(float(staff_count) / float(doctor_count), 2)
+
+        if han_bundle is not None:
+            revenue_estimate_meta = dict(han_bundle["revenue_estimate_meta"])
+            revenue_estimate_meta["nurse_per_doctor"] = npd
+            revenue_estimate_meta["combined_mult"] = round(combined, 4)
+            revenue_estimate_meta["components"] = {
+                "name_keywords": round(float(name_mult), 4),
+                "nurse_intensity": round(float(nurse_mult), 4),
+                "parking": round(float(park_mult), 4),
+                "schedule_yn": round(float(sched_mult), 4),
+            }
+            revenue_estimate_meta["hira_basis_disclaimer"] = (
+                "심평원 병원기본목록 한계: 실제 야간·365·입원실·교정전문 등은 "
+                "상세 API·인허가·플레이스와 결합해야 정밀 추정 가능"
+            )
+        else:
+            revenue_estimate_meta = {
+                "model": "heuristic_v2",
+                "nurse_per_doctor": npd,
+                "combined_mult": round(combined, 4),
+                "components": {
+                    "name_keywords": round(float(name_mult), 4),
+                    "nurse_intensity": round(float(nurse_mult), 4),
+                    "parking": round(float(park_mult), 4),
+                    "schedule_yn": round(float(sched_mult), 4),
+                },
+                "disclaimer": (
+                    "심평원 병원기본목록 한계: 실제 야간·365·입원실·교정전문 등은 "
+                    "상세 API·인허가·플레이스와 결합해야 정밀 추정 가능"
+                ),
+            }
 
         _fallback_id = "hira_" + hashlib.sha256(
             f"{item.get('addr', '')}|{item.get('yadmNm', '')}|{idx}".encode("utf-8", errors="replace")
@@ -1188,21 +1623,7 @@ def _hira_fetch_hospitals_once(
             "estimated_revenue": rev_str,
             "estimated_revenue_man": rev_man,
             "detail_label": detail_label,
-            "revenue_estimate_meta": {
-                "model": "heuristic_v2",
-                "nurse_per_doctor": npd,
-                "combined_mult": round(combined, 4),
-                "components": {
-                    "name_keywords": round(float(name_mult), 4),
-                    "nurse_intensity": round(float(nurse_mult), 4),
-                    "parking": round(float(park_mult), 4),
-                    "schedule_yn": round(float(sched_mult), 4),
-                },
-                "disclaimer": (
-                    "심평원 병원기본목록 한계: 실제 야간·365·입원실·교정전문 등은 "
-                    "상세 API·인허가·플레이스와 결합해야 정밀 추정 가능"
-                ),
-            },
+            "revenue_estimate_meta": revenue_estimate_meta,
             "established_date_raw": str(item.get("estbDd", "")).strip() or None,
             "op_status": "영업중",
             "address": str(item.get("addr", "")).strip() or None,
@@ -1210,6 +1631,10 @@ def _hira_fetch_hospitals_once(
             "sigungu_cd": str(item.get("sgguCd", "")).strip() or None,
             "data_source": data_source,
         }
+        if han_bundle is not None:
+            h["revenue_scenarios"] = han_bundle["revenue_scenarios"]
+            h["revenue_archetype"] = han_bundle["revenue_archetype"]
+            h["revenue_fit_monthly_man"] = han_bundle["revenue_fit_monthly_man"]
         enrich_hospital_killer_fields(h, dept)
         real_hospitals.append(h)
     return real_hospitals, total_doctors_in_radius
@@ -1663,6 +2088,23 @@ class MicroSiteStage2Request(BaseModel):
     top_k: int = 5
 
 
+def _stage2_ecosystem_department_list(primary_dept: str) -> List[str]:
+    """2단계: 동일과목 외 HIRA 조회 과목(기본 치과·내과=양방 의원 프록시). BLUEDOT_STAGE2_ECOSYSTEM_DEPTS=off 로 끔."""
+    raw = (os.getenv("BLUEDOT_STAGE2_ECOSYSTEM_DEPTS") or "치과,내과").strip()
+    if raw.lower() in ("0", "off", "false", "no", "-", "disable"):
+        return []
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        parts = ["치과", "내과"]
+    primary = _normalize_dept_for_hira(primary_dept)
+    out: List[str] = []
+    for p in parts:
+        p2 = _normalize_dept_for_hira(p)
+        if p2 and p2 != primary and p2 not in out:
+            out.append(p2)
+    return out
+
+
 def _stage2_region_cands(
     node: MicroSiteStage2Node,
     eval_r: int,
@@ -1673,6 +2115,21 @@ def _stage2_region_cands(
     r_fetch_km = max(0.5, (eval_r + 320) / 1000.0)
     r_fetch_km = min(r_fetch_km, 3.0)
     hospitals, _ = fetch_real_hospitals(lat, lng, r_fetch_km, dept)
+    eco_depts = _stage2_ecosystem_department_list(dept)
+    merged_for_eco: List[Dict[str, Any]] = list(hospitals or [])
+    if eco_depts:
+        futs = {}
+        with ThreadPoolExecutor(max_workers=min(6, len(eco_depts))) as ex:
+            for d in eco_depts:
+                futs[ex.submit(fetch_real_hospitals, lat, lng, r_fetch_km, d)] = d
+            for fut in as_completed(futs):
+                dnm = futs[fut]
+                try:
+                    extra, _ = fut.result()
+                    merged_for_eco.extend(extra or [])
+                except Exception as e:
+                    logging.warning("2단계 생태계 HIRA 조회 실패 dept=%s: %s", dnm, e)
+    hospitals_ecosystem = dedupe_hospital_markers(merged_for_eco)
     anchor_r = min(2000, max(eval_r * 2 + 320, 720))
     naver_id = (os.getenv("NAVER_CLIENT_ID") or "").strip()
     naver_sec = (os.getenv("NAVER_CLIENT_SECRET") or "").strip()
@@ -1698,6 +2155,7 @@ def _stage2_region_cands(
         kakao_key=kakao_key,
         naver_client_id=naver_id,
         naver_client_secret=naver_sec,
+        hospitals_ecosystem=hospitals_ecosystem,
     )
 
 
@@ -1900,6 +2358,8 @@ def list_payments(user_id: Optional[int] = Depends(_get_current_user_id)):
 _HOSPITALS_ANALYSIS_CACHE_LOCK = threading.Lock()
 _HOSPITALS_ANALYSIS_CACHE: Dict[Tuple[Any, ...], Tuple[float, Dict[str, Any]]] = {}
 _HOSPITALS_ANALYSIS_TTL = float(os.getenv("BLUEDOT_HOSPITALS_CACHE_TTL_SEC", "300"))
+# recommendation JSON 형태가 바뀌면 올려서 기존 메모리 캐시 미스 → 구버전(트렌드 필드 누락 등) 응답 방지
+_HOSPITALS_ANALYSIS_CACHE_SCHEMA = int(os.getenv("BLUEDOT_HOSPITALS_CACHE_SCHEMA", "3"))
 _HOSPITALS_ANALYSIS_MAX_KEYS = int(os.getenv("BLUEDOT_HOSPITALS_CACHE_MAX_KEYS", "120"))
 
 _NEARBY_HOSP_CACHE_LOCK = threading.Lock()
@@ -1913,6 +2373,7 @@ _ANALYSIS_JOBS: Dict[str, Dict[str, Any]] = {}
 
 def _hospitals_analysis_cache_key(lat: float, lng: float, dept: str, radius: int, walk_minutes: int) -> Tuple[Any, ...]:
     return (
+        _HOSPITALS_ANALYSIS_CACHE_SCHEMA,
         round(float(lat), 3),
         round(float(lng), 3),
         str(dept or "").strip(),
@@ -2034,6 +2495,17 @@ class HospitalsAsyncRequest(BaseModel):
     walk_minutes: int = 10
 
 
+class CompetitorAnalysisRequest(BaseModel):
+    """경쟁 병원 좌표 기준 입지 요약(PostGIS 도보 네트워크 + 법정동 SNS 격자 백분위)."""
+
+    competitor_lat: float
+    competitor_lng: float
+    candidate_lat: Optional[float] = None
+    candidate_lng: Optional[float] = None
+    dept: str = "한의원"
+    pnu: Optional[str] = None
+
+
 @app.get("/api/hospitals-nearby")
 def get_hospitals_nearby(lat: float, lng: float, dept: str, radius: int = 1, nocache: bool = False):
     """지도 호버 시 해당 좌표 반경 내 경쟁 의료기관만 반환 (결과 화면에서 사용)."""
@@ -2047,6 +2519,25 @@ def get_hospitals_nearby(lat: float, lng: float, dept: str, radius: int = 1, noc
     if not nocache:
         _nearby_cache_set(ck, lst)
     return {"hospitals": lst}
+
+
+@app.post("/api/competitor-analysis")
+def api_competitor_analysis(body: CompetitorAnalysisRequest):
+    """
+    경쟁사 마커 클릭용: 반경 50m 도보 그래프 교차·복합 노드(PostGIS) +
+    법정동 내 과목 가중 SNS·유동 격자 백분위(SQLite). 후보 좌표가 있으면 미니 레이더 비교.
+    """
+    cfg = _build_phase2_config()
+    return analyze_competitor_location(
+        competitor_lat=body.competitor_lat,
+        competitor_lng=body.competitor_lng,
+        dept=body.dept,
+        kakao_rest_key=KAKAO_REST_KEY or "",
+        phase2_config=cfg,
+        candidate_lat=body.candidate_lat,
+        candidate_lng=body.candidate_lng,
+        pnu=(body.pnu or "").strip() or None,
+    )
 
 
 @app.get("/api/micro-site")
@@ -2127,6 +2618,8 @@ def api_micro_site_stage2(body: MicroSiteStage2Request):
     # 근접 후보도 허용(지도·리스트에서 겹칠 수 있음). 완전 동일 좌표만 소간격으로 배제.
     top_pick = dedupe_pick_top(pool, top_k=top_k, min_sep_m=12.0)
     enrich_stage2_top_with_rationale(top_pick)
+    for _c2 in top_pick:
+        enrich_stage2_candidate_trend(_c2, dept=dept, kakao_rest_key=kk)
     return {
         "status": "success",
         "department": dept,
@@ -2255,6 +2748,7 @@ def _build_data_reliability_summary(
     hospitals: List[dict],
     *,
     phase2_meta: Optional[dict] = None,
+    moct_nodes_loaded: int = 0,
 ) -> dict:
     counts: Dict[str, int] = {}
     for h in hospitals or []:
@@ -2289,6 +2783,9 @@ def _build_data_reliability_summary(
     p2_fb = bool((phase2_meta or {}).get("used_fallback"))
     if p2_fb and n:
         summary_ko += " 도보권은 네트워크 폴백으로 근사했습니다."
+    mn = int(moct_nodes_loaded or 0)
+    if mn > 0:
+        summary_ko += f" 국가 노드·링크(MOCT) 캐시 {mn:,}노드가 로드되어 도로 접점·등급 근거가 보강됩니다."
     return {
         "tier": tier,
         "marker_total": n,
@@ -2297,6 +2794,7 @@ def _build_data_reliability_summary(
         "stale_snapshot_count": stale_n,
         "relaxed_filter_count": relaxed_n,
         "phase2_used_fallback": p2_fb,
+        "moct_nodes_loaded": mn,
         "summary_ko": summary_ko,
     }
 
@@ -2346,7 +2844,9 @@ def get_analysis_data(
                     hlist = _dedupe_hospital_payload_list(cached.get("hospitals") or [])
                     cached["hospitals"] = hlist
                     cached["data_reliability"] = _build_data_reliability_summary(
-                        hlist, phase2_meta=cached.get("phase2")
+                        hlist,
+                        phase2_meta=cached.get("phase2"),
+                        moct_nodes_loaded=moct_node_row_count(),
                     )
                 if not _analysis_data_trustworthy_for_display(cached.get("data_reliability"), dept):
                     _hospitals_cache_delete(ck0)
@@ -2474,7 +2974,18 @@ def get_analysis_data(
             top_5_df = df.sort_values(by='final_score', ascending=False).head(5)
 
             def _work_hospital_row(row: dict) -> Tuple[dict, list]:
-                f_score = float(round(row['final_score'], 1))
+                base_macro = float(round(row['final_score'], 1))
+                han_bt = row.get("best_type") if dept == "한의원" else None
+                _trend = build_trend_payload_for_node(
+                    lat=float(row["center_lat"]),
+                    lng=float(row["center_lng"]),
+                    dept=dept,
+                    base_score_0_10=base_macro,
+                    hanui_best_type=str(han_bt) if han_bt is not None else None,
+                    kakao_rest_key=KAKAO_REST_KEY or "",
+                    master_admin_region_name=str(row.get("행정구역(동읍면)별") or ""),
+                )
+                f_score = float(_trend["trend_floating_score"])
                 doc_ratio = float(row['docs_per_10k'])
                 subway = int(row['subway_count'])
                 bus = int(row['bus_stop_count'])
@@ -2484,7 +2995,12 @@ def get_analysis_data(
                 dist = float(row['distance_km'])
                 node_lat = float(row['center_lat'])
                 node_lng = float(row['center_lng'])
-                
+                moct_hit = lookup_moct_nearest(node_lat, node_lng)
+                moct_adj = moct_macro_score_adjustment(moct_hit) if moct_hit else 0.0
+                f_score = float(
+                    round(max(0.0, min(10.0, f_score + moct_adj)), 1)
+                )
+
                 if doc_ratio >= 5.0: status = "🚨 극도 포화"
                 elif doc_ratio >= 3.0: status = "⚠️ 경쟁 심화"
                 elif doc_ratio >= 1.5: status = "🟢 보통 (안정)"
@@ -2496,6 +3012,18 @@ def get_analysis_data(
                 activity_index = anchor + subway * 3
                 estimated_rent_per_pyeong = 50000 + (activity_index * 8000)
                 estimated_spending = 30000 + (activity_index * 1500) + (row['젊은층_비중'] * 20000)
+                _w_pct = int(round(float(_trend.get("trend_weight") or 0) * 100))
+                _fp_disp = _trend.get("trend_fpop_display")
+                _band = _trend.get("trend_percentile_band_ko") or "—"
+                _trend_sns_formula = (
+                    f"SNS·핫플 {_fp_disp if _fp_disp is not None else '—'}/100 "
+                    f"(동 단위 {_band}, 종합점수 {_w_pct}% 블렌딩)"
+                )
+                _subway_wb = _trend.get("subway_hub_whitebox")
+                _vit_wb = _trend.get("vitality_whitebox")
+                _vit_narr = _trend.get("vitality_narrative_ko")
+                _retail_wb = _trend.get("retail_supply_whitebox_ko")
+                _retail_narr = _trend.get("retail_supply_narrative_ko")
 
                 # 팩트 기반 데이터 텍스트 출력
                 if dept == "소아과":
@@ -2516,14 +3044,17 @@ def get_analysis_data(
                     age_val = row['age_A'] if best == "타입A(전통/통증)" else row['age_B']
                     transit_val = row['transit_A'] if best == "타입A(전통/통증)" else row['transit_B']
 
+                _pop_line, _pop_caveats = _format_population_line(row)
+                _comp_line = _competition_summary_line(status, row)
                 _node = {
                     "name": str(row['행정구역(동읍면)별']),
                     "lat": node_lat,
                     "lng": node_lng,
                     "score_val": f_score,
                     "score": f"{f_score}/10",
-                    "comp_text": f"{status} (기관 {int(row['hosp_count'])}개)",
-                    "pop_text": f"{int(row['총인구 (명)']):,}명 (3040비중 {float(row['젊은층_비중'])*100:.1f}%)",
+                    "comp_text": _comp_line,
+                    "pop_text": _pop_line,
+                    "master_data_caveats": _pop_caveats,
                     "insight": insight,
                     "color": color,
                     "premium_data": {
@@ -2536,6 +3067,17 @@ def get_analysis_data(
                         "anchor_score": f"+{min(25.0, transit_val):.1f} (교통접근성)",
                         "risk_penalty": "20.0 (기본)",
                         "comp_penalty": f"-{float(row['comp_penalty']):.1f}",
+                        "macro_base_score": f"{base_macro} (SNS·역세권·상권활성도 블렌딩 전)",
+                        "trend_sns_whitebox": _trend_sns_formula,
+                        "subway_hub_whitebox": _subway_wb or "",
+                        "vitality_whitebox": _vit_wb or "",
+                        "retail_supply_whitebox": _retail_wb or "",
+                        "moct_whitebox": (
+                            f"노드·링크 보정 {moct_adj:+.2f}점 "
+                            f"(최근접 {moct_hit['nearest_dist_m']:.0f}m·연결 {moct_hit['link_degree']}·등급 {moct_hit['best_road_rank']})"
+                            if moct_hit
+                            else "MOCT 캐시 없음 — scripts/import_moct_nodelink.py 로 생성 가능"
+                        ),
                         "final_score": f"{f_score}"
                     },
                     "phase2": {
@@ -2544,6 +3086,42 @@ def get_analysis_data(
                         "walk_minutes": walk_minutes,
                         "walk_filter_applied": True,
                     },
+                    "macro_base_score": round(base_macro, 1),
+                    "moct_nearest": moct_hit,
+                    "moct_score_adjustment": round(moct_adj, 3),
+                    "retail_supply_avg": _trend.get("retail_supply_avg"),
+                    "retail_supply_percentile_band_ko": _trend.get("retail_supply_percentile_band_ko"),
+                    "retail_supply_n_parcels": _trend.get("retail_supply_n_parcels"),
+                    "retail_supply_strd_ym": _trend.get("retail_supply_strd_ym"),
+                    "retail_supply_narrative_ko": _retail_narr,
+                    "retail_supply_catalog_loaded": _trend.get("retail_supply_catalog_loaded"),
+                    "trend_fpop_display": _trend.get("trend_fpop_display"),
+                    "trend_fpop_mean_dong": _trend.get("trend_fpop_mean_dong"),
+                    "trend_percentile_band_ko": _band,
+                    "trend_weight": _trend.get("trend_weight"),
+                    "trend_narrative_ko": _trend.get("trend_narrative_ko"),
+                    "trend_blend_meta": _trend.get("trend_blend_meta"),
+                    "trend_fpop_availability": _trend.get("trend_fpop_availability"),
+                    "legaldong_b_code": _trend.get("legaldong_b_code"),
+                    "trend_geo_source": _trend.get("trend_geo_source"),
+                    "subway_card_silence": _trend.get("subway_card_silence"),
+                    "subway_nearest_stn_nm": _trend.get("subway_nearest_stn_nm"),
+                    "subway_nearest_dist_m": _trend.get("subway_nearest_dist_m"),
+                    "subway_fpop_proxy_0_100": _trend.get("subway_fpop_proxy_0_100"),
+                    "subway_percentile_band_ko": _trend.get("subway_percentile_band_ko"),
+                    "subway_blend_weight": _trend.get("subway_blend_weight"),
+                    "subway_narrative_ko": _trend.get("subway_narrative_ko"),
+                    "subway_blend_meta": _trend.get("subway_blend_meta"),
+                    "vitality_sigungu_avg": _trend.get("vitality_sigungu_avg"),
+                    "vitality_percentile_band_ko": _trend.get("vitality_percentile_band_ko"),
+                    "vitality_blend_weight": _trend.get("vitality_blend_weight"),
+                    "vitality_narrative_ko": _vit_narr,
+                    "vitality_blend_meta": _trend.get("vitality_blend_meta"),
+                    "vitality_proxy_0_100": _trend.get("vitality_proxy_0_100"),
+                    "vitality_block_reason": _trend.get("vitality_block_reason"),
+                    "vitality_data_source": _trend.get("vitality_data_source"),
+                    "vitality_trdar_nm": _trend.get("vitality_trdar_nm"),
+                    "vitality_region_hint_ko": _trend.get("vitality_region_hint_ko"),
                 }
                 real_hosps, _ = fetch_real_hospitals(node_lat, node_lng, 1, dept)
                 _node["nearby_hospitals"] = real_hosps
@@ -2589,7 +3167,9 @@ def get_analysis_data(
                 "recommendations": ranked_nodes,
                 "phase2": phase2_meta,
                 "data_reliability": _build_data_reliability_summary(
-                    all_hospitals, phase2_meta=phase2_meta
+                    all_hospitals,
+                    phase2_meta=phase2_meta,
+                    moct_nodes_loaded=moct_node_row_count(),
                 ),
             }
             if not _analysis_data_trustworthy_for_display(payload.get("data_reliability"), dept):
@@ -2817,7 +3397,18 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
             top_5_df = df.sort_values(by='final_score', ascending=False).head(5)
 
             def _work_ai_row(row: dict) -> Tuple[dict, list]:
-                f_score = float(round(row['final_score'], 1))
+                base_macro = float(round(row['final_score'], 1))
+                han_bt = row.get("best_type") if dept_name == "한의원" else None
+                _trend = build_trend_payload_for_node(
+                    lat=float(row["center_lat"]),
+                    lng=float(row["center_lng"]),
+                    dept=dept_name,
+                    base_score_0_10=base_macro,
+                    hanui_best_type=str(han_bt) if han_bt is not None else None,
+                    kakao_rest_key=KAKAO_REST_KEY or "",
+                    master_admin_region_name=str(row.get("행정구역(동읍면)별") or ""),
+                )
+                f_score = float(_trend["trend_floating_score"])
                 doc_ratio = float(row['docs_per_10k'])
                 subway = int(row['subway_count'])
                 bus = int(row['bus_stop_count'])
@@ -2827,7 +3418,12 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                 dist = float(row['distance_km'])
                 node_lat = float(row['center_lat'])
                 node_lng = float(row['center_lng'])
-                
+                moct_hit = lookup_moct_nearest(node_lat, node_lng)
+                moct_adj = moct_macro_score_adjustment(moct_hit) if moct_hit else 0.0
+                f_score = float(
+                    round(max(0.0, min(10.0, f_score + moct_adj)), 1)
+                )
+
                 if doc_ratio >= 5.0: status = "🚨 극도 포화"
                 elif doc_ratio >= 3.0: status = "⚠️ 경쟁 심화"
                 elif doc_ratio >= 1.5: status = "🟢 보통 (안정)"
@@ -2839,6 +3435,18 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                 activity_index = anchor + subway * 3
                 estimated_rent_per_pyeong = 50000 + (activity_index * 8000)
                 estimated_spending = 30000 + (activity_index * 1500) + (row['젊은층_비중'] * 20000)
+                _w_pct = int(round(float(_trend.get("trend_weight") or 0) * 100))
+                _fp_disp = _trend.get("trend_fpop_display")
+                _band = _trend.get("trend_percentile_band_ko") or "—"
+                _trend_sns_formula = (
+                    f"SNS·핫플 {_fp_disp if _fp_disp is not None else '—'}/100 "
+                    f"(동 단위 {_band}, 종합점수 {_w_pct}% 블렌딩)"
+                )
+                _subway_wb = _trend.get("subway_hub_whitebox")
+                _vit_wb_ai = _trend.get("vitality_whitebox")
+                _vit_narr_ai = _trend.get("vitality_narrative_ko")
+                _retail_wb_ai = _trend.get("retail_supply_whitebox_ko")
+                _retail_narr_ai = _trend.get("retail_supply_narrative_ko")
 
                 scope_txt = f"{region_display} 내" if use_region_filter else f"검색 반경 {dist:.1f}km"
                 if dept_name == "소아과":
@@ -2859,14 +3467,17 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                     age_val = row['age_A'] if best == "타입A(전통/통증)" else row['age_B']
                     transit_val = row['transit_A'] if best == "타입A(전통/통증)" else row['transit_B']
 
+                _pop_line_ai, _pop_caveats_ai = _format_population_line(row)
+                _comp_line_ai = _competition_summary_line(status, row)
                 _node = {
                     "name": str(row['행정구역(동읍면)별']),
                     "lat": node_lat,
                     "lng": node_lng,
                     "score_val": f_score,
                     "score": f"{f_score}/10",
-                    "comp_text": f"{status} (기관 {int(row['hosp_count'])}개)",
-                    "pop_text": f"{int(row['총인구 (명)']):,}명 (3040비중 {float(row['젊은층_비중'])*100:.1f}%)",
+                    "comp_text": _comp_line_ai,
+                    "pop_text": _pop_line_ai,
+                    "master_data_caveats": _pop_caveats_ai,
                     "insight": insight,
                     "color": color,
                     "premium_data": {
@@ -2879,6 +3490,17 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                         "anchor_score": f"+{min(25.0, transit_val):.1f} (교통접근성)",
                         "risk_penalty": "20.0 (기본)",
                         "comp_penalty": f"-{float(row['comp_penalty']):.1f}",
+                        "macro_base_score": f"{base_macro} (SNS·역세권·상권활성도 블렌딩 전)",
+                        "trend_sns_whitebox": _trend_sns_formula,
+                        "subway_hub_whitebox": _subway_wb or "",
+                        "vitality_whitebox": _vit_wb_ai or "",
+                        "retail_supply_whitebox": _retail_wb_ai or "",
+                        "moct_whitebox": (
+                            f"노드·링크 보정 {moct_adj:+.2f}점 "
+                            f"(최근접 {moct_hit['nearest_dist_m']:.0f}m·연결 {moct_hit['link_degree']}·등급 {moct_hit['best_road_rank']})"
+                            if moct_hit
+                            else "MOCT 캐시 없음 — scripts/import_moct_nodelink.py 로 생성 가능"
+                        ),
                         "final_score": f"{f_score}"
                     },
                     "phase2": {
@@ -2887,6 +3509,42 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
                         "walk_minutes": walk_minutes,
                         "walk_filter_applied": True,
                     },
+                    "macro_base_score": round(base_macro, 1),
+                    "moct_nearest": moct_hit,
+                    "moct_score_adjustment": round(moct_adj, 3),
+                    "retail_supply_avg": _trend.get("retail_supply_avg"),
+                    "retail_supply_percentile_band_ko": _trend.get("retail_supply_percentile_band_ko"),
+                    "retail_supply_n_parcels": _trend.get("retail_supply_n_parcels"),
+                    "retail_supply_strd_ym": _trend.get("retail_supply_strd_ym"),
+                    "retail_supply_narrative_ko": _retail_narr_ai,
+                    "retail_supply_catalog_loaded": _trend.get("retail_supply_catalog_loaded"),
+                    "trend_fpop_display": _trend.get("trend_fpop_display"),
+                    "trend_fpop_mean_dong": _trend.get("trend_fpop_mean_dong"),
+                    "trend_percentile_band_ko": _band,
+                    "trend_weight": _trend.get("trend_weight"),
+                    "trend_narrative_ko": _trend.get("trend_narrative_ko"),
+                    "trend_blend_meta": _trend.get("trend_blend_meta"),
+                    "trend_fpop_availability": _trend.get("trend_fpop_availability"),
+                    "legaldong_b_code": _trend.get("legaldong_b_code"),
+                    "trend_geo_source": _trend.get("trend_geo_source"),
+                    "subway_card_silence": _trend.get("subway_card_silence"),
+                    "subway_nearest_stn_nm": _trend.get("subway_nearest_stn_nm"),
+                    "subway_nearest_dist_m": _trend.get("subway_nearest_dist_m"),
+                    "subway_fpop_proxy_0_100": _trend.get("subway_fpop_proxy_0_100"),
+                    "subway_percentile_band_ko": _trend.get("subway_percentile_band_ko"),
+                    "subway_blend_weight": _trend.get("subway_blend_weight"),
+                    "subway_narrative_ko": _trend.get("subway_narrative_ko"),
+                    "subway_blend_meta": _trend.get("subway_blend_meta"),
+                    "vitality_sigungu_avg": _trend.get("vitality_sigungu_avg"),
+                    "vitality_percentile_band_ko": _trend.get("vitality_percentile_band_ko"),
+                    "vitality_blend_weight": _trend.get("vitality_blend_weight"),
+                    "vitality_narrative_ko": _vit_narr_ai,
+                    "vitality_blend_meta": _trend.get("vitality_blend_meta"),
+                    "vitality_proxy_0_100": _trend.get("vitality_proxy_0_100"),
+                    "vitality_block_reason": _trend.get("vitality_block_reason"),
+                    "vitality_data_source": _trend.get("vitality_data_source"),
+                    "vitality_trdar_nm": _trend.get("vitality_trdar_nm"),
+                    "vitality_region_hint_ko": _trend.get("vitality_region_hint_ko"),
                 }
                 real_hosps, _ = fetch_real_hospitals(node_lat, node_lng, 1, dept_name)
                 _node["nearby_hospitals"] = real_hosps
@@ -2932,13 +3590,13 @@ def ai_search(lat: float, lng: float, prompt: str, radius: int = 3, walk_minutes
         node["rank"] = index + 1
         if "color" not in node:
             node["color"] = "#10B981" if node["score_val"] >= 8.5 else "#3B82F6" if node["score_val"] >= 7.0 else "#F59E0B"
-        if "score_val" in node:
-            del node["score_val"]
         recommendations.append(node)
 
     all_hospitals = _dedupe_hospital_payload_list(all_hospitals)
     _dr_final = _build_data_reliability_summary(
-        all_hospitals, phase2_meta=phase2_meta if "phase2_meta" in locals() else None
+        all_hospitals,
+        phase2_meta=phase2_meta if "phase2_meta" in locals() else None,
+        moct_nodes_loaded=moct_node_row_count(),
     )
     if not _analysis_data_trustworthy_for_display(_dr_final, dept_name):
         return _insufficient_data_payload(_dr_final)

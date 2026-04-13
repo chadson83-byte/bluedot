@@ -1,5 +1,7 @@
 # 배포 가이드 (추천: Vercel + Fly.io)
 
+**Fly + SQLite + 오아시스 CSV**: 웹 SQL 에디터는 없습니다. 어디까지 자동이고 무엇을 직접 해야 하는지는 **[FLY_SQLITE_AND_DATA.md](./FLY_SQLITE_AND_DATA.md)** 를 보세요.
+
 ## 구조
 
 - **프론트(정적)**: Vercel

@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 
 from engine.geo_utils import haversine_km, offset_lat_lng
+from engine.moct_network import lookup_moct_nearest, moct_stage2_visibility_bonus
 
 _MICRO_CACHE: Dict[str, Tuple[float, List[Dict[str, Any]]]] = {}
 _MICRO_LOCK = threading.Lock()
@@ -58,6 +59,26 @@ def _count_hospitals_within(lat: float, lng: float, radius_m: float, hospitals: 
         if haversine_m(lat, lng, pair[0], pair[1]) <= radius_m:
             n += 1
     return n
+
+
+def dedupe_hospital_markers(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """HIRA 병합 목록에서 동일 기관(식별자 또는 좌표) 중복 제거."""
+    seen: set = set()
+    out: List[Dict[str, Any]] = []
+    for h in items or []:
+        hid = str(h.get("id") or "").strip()
+        pair = _hospital_lat_lng(h)
+        if hid:
+            key: str = hid
+        elif pair:
+            key = f"{round(pair[0], 5)}|{round(pair[1], 5)}"
+        else:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(h)
+    return out
 
 
 # 2단계: GIS 폴리곤 없이 카카오 키워드로 학교·단지·공원 프록시 (실폴리곤 마스킹은 추후 브이월드/OSM)
@@ -203,9 +224,8 @@ def evaluate_land_use_for_candidate(
     if anchor_poi_count_100m == 0 and 2 <= anchor_poi_count_300m <= 5:
         mult *= 0.38
         reasons.append("100m무앵커·300m소량앵커 → 골목·단지내부 프록시(강감점)")
-    if anchor_poi_count_100m == 0 and anchor_poi_count_300m >= 6:
-        mult *= 0.48
-        reasons.append("100m무앵커·300m다앵커 → 상권 띠 바깥(이면) 프록시")
+    # 예전: 100m 무앵커 + 300m 다앵커에 0.48 감점 → 2단계가 125m 그리드로 대로 상가축에서
+    # 한 블록 안쪽일 때 흔히 걸려 '큰 도로' 후보보다 골목이 유리한 왜곡이 났음. 감점 제거.
     elif anchor_poi_count_100m == 0 and anchor_poi_count_300m <= 1:
         mult *= 0.62
         reasons.append("근접 상업앵커 매우 부족")
@@ -258,8 +278,10 @@ def build_region_candidate_scores(
     kakao_key: str = "",
     naver_client_id: str = "",
     naver_client_secret: str = "",
+    hospitals_ecosystem: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
-    """한 권역(1차 노드) 내 9개 후보 좌표에 대해 앵커·경쟁·마스터·토지용도·은행·마트 기반 미시 점수."""
+    """한 권역(1차 노드) 내 9개 후보 좌표에 대해 앵커·경쟁·마스터·토지용도·은행·마트 기반 미시 점수.
+    hospitals_ecosystem: 동일과목+타과목(치과·내과 등) 병합 목록이면 평가반경 내 타과목 밀집 가점에 사용."""
     hazards = collect_land_use_hazard_pois(
         kakao_key=kakao_key,
         lat=center_lat,
@@ -275,15 +297,34 @@ def build_region_candidate_scores(
         lng=center_lng,
         radius_m=rf_radius,
     )
+    bus_places, bus_meta = collect_bus_access_pois(
+        kakao_key=kakao_key,
+        naver_client_id=naver_client_id,
+        naver_client_secret=naver_client_secret,
+        lat=center_lat,
+        lng=center_lng,
+        radius_m=rf_radius,
+    )
+    if bus_meta.get("errors"):
+        rf_meta = dict(rf_meta) if isinstance(rf_meta, dict) else {}
+        rf_meta["bus_access_errors"] = bus_meta.get("errors")
     out: List[Dict[str, Any]] = []
+    eco_list = hospitals_ecosystem if hospitals_ecosystem is not None else None
     for la, ln, dist_m, dir_label in candidate_offsets_9(center_lat, center_lng, offset_m=offset_m):
         n_a = _count_anchors_within(la, ln, float(eval_radius_m), anchors)
         n_c = _count_hospitals_within(la, ln, float(eval_radius_m), hospitals)
+        n_eco_eval = (
+            _count_hospitals_within(la, ln, float(eval_radius_m), eco_list)
+            if eco_list
+            else int(n_c)
+        )
+        n_peer_eval = max(0, int(n_eco_eval) - int(n_c)) if eco_list else 0
         n_a_100 = _count_anchors_within(la, ln, 100.0, anchors)
         n_a_300 = _count_anchors_within(la, ln, 300.0, anchors)
         n_c_100 = _count_hospitals_within(la, ln, 100.0, hospitals)
         n_bank_150 = _count_retail_within(la, ln, 150.0, bank_places)
         n_mart_300 = _count_retail_within(la, ln, 300.0, mart_places)
+        n_bus_120 = _count_retail_within(la, ln, 120.0, bus_places)
         land_use = evaluate_land_use_for_candidate(
             la,
             ln,
@@ -322,6 +363,8 @@ def build_region_candidate_scores(
             bsc = float(row.get("bus_stop_count")) if row.get("bus_stop_count") is not None else None
         except (TypeError, ValueError):
             bsc = None
+        _moct_hit = lookup_moct_nearest(la, ln)
+        _moct_vis = moct_stage2_visibility_bonus(_moct_hit)
         sc = score_proptech_clinic_site(
             lat=la,
             lng=ln,
@@ -341,6 +384,10 @@ def build_region_candidate_scores(
             land_use_reasons=list(land_use.get("reasons") or []),
             bank_poi_count_150m=n_bank_150,
             mart_poi_count_300m=n_mart_300,
+            same_dept_competitors_eval_m=int(n_c),
+            bus_stop_poi_count_120m=int(n_bus_120),
+            moct_visibility_bonus=_moct_vis,
+            cross_dept_medical_eval_m=int(n_peer_eval),
         )
         pname = (parent_name or "").strip() or "권역"
         pr = int(parent_rank) if parent_rank else 0
@@ -358,6 +405,8 @@ def build_region_candidate_scores(
             "eval_radius_m": eval_radius_m,
             "department": dept,
             "competitor_count": n_c,
+            "peer_medical_count_eval": n_peer_eval,
+            "total_medical_ecosystem_eval": n_eco_eval,
             "anchor_poi_count": n_a,
             "anchor_poi_count_100m": n_a_100,
             "anchor_poi_count_300m": n_a_300,
@@ -366,6 +415,7 @@ def build_region_candidate_scores(
             "retail_finance_meta": rf_meta,
             "bank_poi_count_150m": n_bank_150,
             "mart_poi_count_300m": n_mart_300,
+            "bus_stop_poi_count_120m": n_bus_120,
             "scoring": sc,
             "region_proxy": {
                 "name": ctx.get("region_name") if ctx else None,
@@ -388,9 +438,14 @@ def build_stage2_selection_rationale_ko(c: Dict[str, Any]) -> str:
     offset_dir = c.get("offset_dir") or "중심"
     offset_m = c.get("offset_m")
     n_c = int(c.get("competitor_count") or 0)
+    n_peer = int(c.get("peer_medical_count_eval") or 0)
     n_a = int(c.get("anchor_poi_count") or 0)
     n_a100 = int(c.get("anchor_poi_count_100m") or 0)
     n_m100 = int(c.get("medical_facility_count_100m") or 0)
+    n_bus120 = int(c.get("bus_stop_poi_count_120m") or 0)
+    mclus = float(comp.get("medical_district_cluster") or 0)
+    mpen = float(comp.get("competition_context_penalty") or 0)
+    meco = float(comp.get("medical_ecosystem_mix") or 0)
     ft = float(comp.get("foot_traffic") or 0)
     vis = float(comp.get("visibility_access") or 0)
     res = float(comp.get("residential_proximity") or 0)
@@ -404,8 +459,12 @@ def build_stage2_selection_rationale_ko(c: Dict[str, Any]) -> str:
         f"1단계 {parent_rank}위 권역「{parent_name}」의 {loc}을 기준으로 "
         f"6축 입지 점수(유동·가시성·배후주거·앵커·메디컬시너지·주차)를 산출했습니다. "
         f"참고: 평가 반경 {int(c.get('eval_radius_m') or 0) or '—'}m 내 앵커 {n_a}곳·동일과목 의원 {n_c}곳, "
-        f"100m 기준 앵커 {n_a100}곳·의료시설(동일과목) {n_m100}곳."
+        f"100m 기준 앵커 {n_a100}곳·의료시설(동일과목) {n_m100}곳, "
+        f"120m 내 버스정류장 POI {n_bus120}곳. "
+        f"메디컬상권 검증 가점 +{mclus:.1f}점·경쟁참고 감점 {mpen:.1f}점 반영."
     )
+    if n_peer > 0 and meco > 0:
+        head += f" 타과목 의료기관(치과·양방 등 병합) {n_peer}곳 근접 → 복합 메디컬 상권 보조 +{meco:.1f}점."
     reasons: List[str] = []
     if ft >= 25:
         reasons.append("유동·상권 활력 프록시가 높은 편입니다.")
@@ -427,8 +486,8 @@ def enrich_stage2_top_with_rationale(rows: List[Dict[str, Any]]) -> None:
         row["selection_rationale_ko"] = build_stage2_selection_rationale_ko(row)
 
 
-def _stage2_candidate_sort_key(c: Dict[str, Any]) -> Tuple[float, float, int, int, int]:
-    """동일 총점이면 좌표 기준 상업활력·근접 앵커가 높은 후보를 우선(골목·단지 동점 탈출)."""
+def _stage2_candidate_sort_key(c: Dict[str, Any]) -> Tuple[float, float, int, int, int, float, float, float]:
+    """동일 총점이면 상업활력·앵커·메디컬상권·복합메디컬 가점·경쟁감점 순으로 타이브레이크."""
     sc = c.get("scoring") or {}
     score = float(sc.get("score") or 0)
     na100 = int(c.get("anchor_poi_count_100m") or 0)
@@ -436,7 +495,11 @@ def _stage2_candidate_sort_key(c: Dict[str, Any]) -> Tuple[float, float, int, in
     nb = int(c.get("bank_poi_count_150m") or 0)
     nm = int(c.get("mart_poi_count_300m") or 0)
     vit = _commercial_vitality_01(na100, na300, nb, nm)
-    return (-score, -vit, -na100, -nb, -nm)
+    comp = sc.get("components") or {}
+    mclus = float(comp.get("medical_district_cluster") or 0)
+    meco = float(comp.get("medical_ecosystem_mix") or 0)
+    mpen = float(comp.get("competition_context_penalty") or 0)
+    return (-score, -vit, -na100, -nb, -nm, -mclus, -meco, mpen)
 
 
 def dedupe_pick_top(
@@ -703,6 +766,115 @@ def collect_retail_finance_pois(
     return list(bank_map.values()), list(mart_map.values()), meta
 
 
+def collect_bus_access_pois(
+    *,
+    kakao_key: str,
+    naver_client_id: str = "",
+    naver_client_secret: str = "",
+    lat: float,
+    lng: float,
+    radius_m: int = 2000,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    2단계 후보별 보행·횡단·대로 접근성 보강용.
+    행정동 단위 bus_stop_count만으로는 같은 동 내 후보 차이가 없어, 좌표 기준 POI로 보완.
+    """
+    meta: Dict[str, Any] = {"errors": [], "query": "버스정류장"}
+    out: Dict[str, Dict[str, Any]] = {}
+    if not (kakao_key or "").strip() and not (
+        (naver_client_id or "").strip() and (naver_client_secret or "").strip()
+    ):
+        return [], meta
+    try:
+        rows = dual_source_places_for_query(
+            kakao_key=kakao_key,
+            naver_client_id=naver_client_id,
+            naver_client_secret=naver_client_secret,
+            lat=lat,
+            lng=lng,
+            radius_m=radius_m,
+            query="버스정류장",
+        )
+        for r in rows or []:
+            try:
+                la = float(r.get("lat"))
+                ln = float(r.get("lng"))
+            except (TypeError, ValueError):
+                continue
+            key = f"{round(la, 5)},{round(ln, 5)}"
+            if key in out:
+                continue
+            x = dict(r)
+            x["access_kind"] = "bus_stop"
+            out[key] = x
+    except Exception as e:
+        meta["errors"].append(str(e))
+    return list(out.values()), meta
+
+
+def _medical_cluster_competition_balance(n_same_dept_eval: int) -> Tuple[float, float, List[str]]:
+    """
+    의료기관(동일과목) 밀집 = 시장에서 검증된 메디컬 상권·집객 동선 → 가점.
+    동시에 경쟁 심화는 순위·전략 참고용 소폭 감점(상권 프리미엄을 상쇄하지 않도록 상한).
+    """
+    notes: List[str] = []
+    n = max(0, int(n_same_dept_eval))
+    bonus = 0.0
+    penalty = 0.0
+    if n >= 5:
+        bonus = min(12.0, 3.2 + (n - 5) * 0.62)
+        notes.append(
+            f"메디컬상권: 평가반경 내 동일과목 {n}곳 밀집 → 입증된 의료 소비·집객 상권으로 가산(+{bonus:.1f})."
+        )
+    elif n >= 3:
+        bonus = 2.0 + (n - 3) * 1.1
+        notes.append(
+            f"메디컬상권: 동일과목 {n}곳 근접 → 메디컬 스트리트 형성 구역 가산(+{bonus:.1f})."
+        )
+    elif n >= 1:
+        bonus = 0.6 * float(n)
+        notes.append(f"메디컬상권: 동일과목 {n}곳 인접 → 의료 동선 프록시 가산(+{bonus:.1f}).")
+
+    if n >= 8:
+        penalty = min(10.0, 3.0 + (n - 8) * 0.55)
+        notes.append(
+            f"경쟁참고(순위·전략): 동일과목 다수 밀집 → 차별화·마케팅 부담 프록시(-{penalty:.1f})."
+        )
+    elif n >= 5:
+        penalty = min(6.5, 1.2 + (n - 5) * 0.85)
+        notes.append(f"경쟁참고: 동일과목 경쟁 심화 예상(-{penalty:.1f}).")
+    elif n >= 3:
+        penalty = 0.8 + (n - 3) * 0.5
+        notes.append(f"경쟁참고: 인근 동일과목 경쟁 다소 있음(-{penalty:.1f}).")
+
+    return bonus, penalty, notes
+
+
+def _peer_medical_ecosystem_bonus(n_peer: int) -> Tuple[float, List[str]]:
+    """
+    동일과목 외 인근 의료기관(치과·내과 등 병합 조회분) 밀집 → 메디컬 거리·집객 상권 보조 신호.
+    총점 100 상한을 넘기지 않도록 별도 소항목으로 소폭만 가산.
+    """
+    notes: List[str] = []
+    n = max(0, int(n_peer))
+    if n <= 0:
+        return 0.0, notes
+    if n >= 12:
+        b = 8.0
+    elif n >= 8:
+        b = 6.5
+    elif n >= 5:
+        b = 4.5
+    elif n >= 3:
+        b = 2.8
+    else:
+        b = 1.0
+    notes.append(
+        f"복합메디컬상권: 평가반경 내 타과목 의료기관 약 {n}곳 → 한의원·치과·양방이 함께 밀집한 상권축 프록시 가산(+{b:.1f})."
+    )
+    return min(8.0, b), notes
+
+
 def _count_retail_within(
     lat: float,
     lng: float,
@@ -850,10 +1022,16 @@ def score_proptech_clinic_site(
     land_use_reasons: Optional[List[str]] = None,
     bank_poi_count_150m: int = 0,
     mart_poi_count_300m: int = 0,
+    same_dept_competitors_eval_m: int = 0,
+    bus_stop_poi_count_120m: Optional[int] = None,
+    moct_visibility_bonus: float = 0.0,
+    cross_dept_medical_eval_m: int = 0,
 ) -> Dict[str, Any]:
     """
     의원·상가 입지 100점 만점 (6축) + S/A/B/C.
     상업 가시성 우선: 토지용도 하드제외·이면 프록시는 land_use_* 로 주입.
+    동일과목 밀집(평가반경)=검증된 메디컬 상권 가점 + 경쟁 참고 감점.
+    타과목 의료기관 밀집(2단계 병합 HIRA)=복합 메디컬 상권 보조 가점.
     """
     notes: List[str] = []
     lur = list(land_use_reasons or [])
@@ -873,9 +1051,12 @@ def score_proptech_clinic_site(
                 "anchor_franchises": 0.0,
                 "medical_synergy": 0.0,
                 "parking_infrastructure": 0.0,
+                "medical_district_cluster": 0.0,
+                "competition_context_penalty": 0.0,
+                "medical_ecosystem_mix": 0.0,
             },
             "scoring_meta": {
-                "method": "proptech_clinic_v4_street_scaled",
+                "method": "proptech_clinic_v6_medical_ecosystem",
                 "notes": notes,
                 "hard_excluded": True,
                 "commercial_vitality_01": 0.0,
@@ -948,12 +1129,38 @@ def score_proptech_clinic_site(
         notes.append("횡단보도: POI 미연동 → 해당 행정동 버스정류장 수로 보행·접근성 프록시.")
     else:
         notes.append("횡단보도: 버스정류장 수 없음 → 0점(데이터 공백).")
-    # 동일 동·동일 버스 정류장 수인데 골목은 대로가 아님 → 무앵커일 때 버스 프록시 축소
+    # 후보 좌표 120m 내 버스정류장 POI(카카오·네이버) — 행정동 집계와 병행해 횡단·대로접근 보강
+    if bus_stop_poi_count_120m is not None:
+        nb_loc = max(0, int(bus_stop_poi_count_120m))
+        if nb_loc >= 4:
+            cross = max(cross, 10.0)
+        elif nb_loc >= 2:
+            cross = max(cross, 7.0)
+        elif nb_loc >= 1:
+            cross = max(cross, 4.5)
+        if nb_loc > 0:
+            notes.append(
+                f"보행·횡단 프록시: 후보 120m 내 버스정류장 POI {nb_loc}곳 반영(대로·접근성)."
+            )
+    # 100m 무앵커일 때 버스·횡단 프록시 축소 — 다만 300m 내 앵커가 많으면 대로변 상가 '띠' 인접로 보고 덜 깎음
     if na1_ft == 0:
-        cross *= 0.22 + 0.14 * min(1.0, na3_ft / 8.0)
-        if cross > 0 and cross < 10.0:
-            notes.append("가시성 보정: 100m 무앵커 → 행정동 버스정류장 프록시 축소(이면도로).")
-    visibility = min(20.0, corner + cross)
+        if na3_ft >= 10:
+            scale = 0.86
+        elif na3_ft >= 6:
+            scale = 0.55 + 0.08 * min(1.0, (na3_ft - 6) / 4.0)
+        else:
+            scale = 0.22 + 0.14 * min(1.0, na3_ft / 8.0)
+        cross *= scale
+        if cross > 0 and cross < 10.0 and na3_ft < 6:
+            notes.append("가시성 보정: 100m 무앵커·상가축 멀음 → 버스정류장 프록시 축소(이면도로).")
+        elif na3_ft >= 6:
+            notes.append("가시성 보정: 300m 내 앵커 다수 — 대로·상가축 근접으로 버스 프록시 완화.")
+    moct_vb = max(0.0, min(6.0, float(moct_visibility_bonus or 0.0)))
+    if moct_vb > 0:
+        notes.append(
+            f"국가 노드·링크(MOCT): 차량 도로망 최근접 노드 기준 가시성·접근 보조 +{moct_vb:.1f}점(상한 20점 내)."
+        )
+    visibility = min(20.0, corner + cross + moct_vb)
 
     # 3) 배후 주거 (max 20) — 행정동 중심 프록시이나, 무앵커 전면이면 과대가점 방지(상업입지 우선)
     residential = 0.0
@@ -1001,7 +1208,10 @@ def score_proptech_clinic_site(
         med = 7.0
     else:
         med = 3.0
-    notes.append("메디컬 시너지: 심평원 동일(유사) 과목만 집계 — 타 과목·약국은 추후 POI로 확장 가능.")
+    notes.append(
+        "메디컬 시너지(100m): 심평원 동일·유사 과목 인접 — 메디컬블록 내 유입 프록시. "
+        "평가반경 밀집은 별도 '메디컬상권' 가점·경쟁 감점으로 반영."
+    )
 
     # 6) 주차 (max 5)
     park = 0.0
@@ -1019,7 +1229,13 @@ def score_proptech_clinic_site(
         notes.append("공영·민영 주차: 반경 100m 주차장 POI 미연동 → 가점 미반영.")
     park = min(5.0, park)
 
-    total = foot + visibility + residential + anchor_pts + med + park
+    m_bonus, m_penalty, m_notes = _medical_cluster_competition_balance(same_dept_competitors_eval_m)
+    notes.extend(m_notes)
+
+    eco_bonus, eco_notes = _peer_medical_ecosystem_bonus(cross_dept_medical_eval_m)
+    notes.extend(eco_notes)
+
+    total = foot + visibility + residential + anchor_pts + med + park + m_bonus - m_penalty + eco_bonus
     total = max(0.0, min(100.0, total))
     lm = float(land_use_mult)
     if lm < 0.1:
@@ -1050,14 +1266,24 @@ def score_proptech_clinic_site(
             "anchor_franchises": round(anchor_pts, 1),
             "medical_synergy": round(med, 1),
             "parking_infrastructure": round(park, 1),
+            "medical_district_cluster": round(m_bonus, 1),
+            "competition_context_penalty": round(m_penalty, 1),
+            "medical_ecosystem_mix": round(eco_bonus, 1),
         },
         "scoring_meta": {
-            "method": "proptech_clinic_v4_street_scaled",
+            "method": "proptech_clinic_v6_medical_ecosystem",
             "notes": notes,
             "anchor_poi_count_300m": int(anchor_poi_count_300m),
             "bank_poi_count_150m": int(bank_poi_count_150m),
             "mart_poi_count_300m": int(mart_poi_count_300m),
             "commercial_vitality_01": round(vit, 3),
+            "same_dept_competitors_eval_m": int(same_dept_competitors_eval_m),
+            "cross_dept_medical_eval_m": int(cross_dept_medical_eval_m),
+            "medical_district_bonus": round(m_bonus, 2),
+            "medical_ecosystem_bonus": round(eco_bonus, 2),
+            "competition_penalty_points": round(m_penalty, 2),
+            "bus_stop_poi_120m_used": bus_stop_poi_count_120m is not None,
+            "moct_visibility_bonus": round(moct_vb, 2),
         },
     }
 
@@ -1151,6 +1377,15 @@ def build_micro_site_payload(
     )
     n_bank_150 = _count_retail_within(lat, lng, 150.0, bank_pl)
     n_mart_300 = _count_retail_within(lat, lng, 300.0, mart_pl)
+    bus_pl, _bus_m = collect_bus_access_pois(
+        kakao_key=kakao_key,
+        naver_client_id=naver_client_id,
+        naver_client_secret=naver_client_secret,
+        lat=lat,
+        lng=lng,
+        radius_m=min(2000, max(radius_m * 3, 900)),
+    )
+    n_bus_120 = _count_retail_within(lat, lng, 120.0, bus_pl)
     act = None
     young = None
     row: Dict[str, Any] = {}
@@ -1176,6 +1411,8 @@ def build_micro_site_payload(
         bsc = float(row.get("bus_stop_count")) if row.get("bus_stop_count") is not None else None
     except (TypeError, ValueError):
         bsc = None
+    _moct_hit2 = lookup_moct_nearest(lat, lng)
+    _moct_vis2 = moct_stage2_visibility_bonus(_moct_hit2)
     scoring = score_proptech_clinic_site(
         lat=lat,
         lng=lng,
@@ -1192,6 +1429,9 @@ def build_micro_site_payload(
         bus_stop_count=bsc,
         bank_poi_count_150m=n_bank_150,
         mart_poi_count_300m=n_mart_300,
+        same_dept_competitors_eval_m=int(n_comp),
+        bus_stop_poi_count_120m=int(n_bus_120),
+        moct_visibility_bonus=_moct_vis2,
     )
     comp_out: List[Dict[str, Any]] = []
     for h in (competitors or [])[:40]:

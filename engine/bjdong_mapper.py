@@ -19,7 +19,7 @@ from __future__ import annotations
 import os
 import re
 from functools import lru_cache
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_BJDONG_TXT = os.path.join(_BASE, "data", "법정동코드 전체자료.txt")
@@ -59,6 +59,90 @@ def extract_legal_dong_from_address(addr: str) -> Optional[str]:
         if p.endswith(("동", "읍", "면", "리", "가")):
             return p
     return None
+
+
+def _read_legaldong_rows(path: str) -> List[Tuple[str, str, str]]:
+    """(code10, name, status) 목록."""
+    rows: List[Tuple[str, str, str]] = []
+    if not os.path.isfile(path):
+        return rows
+    text = None
+    for enc in ("utf-8", "cp949"):
+        try:
+            with open(path, "r", encoding=enc, errors="replace") as f:
+                sample = f.read(4096)
+                rest = f.read()
+            candidate = sample + rest
+            if enc == "utf-8" and candidate.count("\ufffd") > 10:
+                continue
+            text = candidate
+            break
+        except Exception:
+            text = None
+    if text is None:
+        return rows
+    lines = text.splitlines()
+    for line in lines[1:]:
+        line = line.strip()
+        if not line:
+            continue
+        cols = line.split("\t")
+        if len(cols) < 3:
+            continue
+        code10 = re.sub(r"\D", "", cols[0])
+        name = _norm_space(cols[1])
+        status = _norm_space(cols[2])
+        if len(code10) != 10:
+            continue
+        rows.append((code10, name, status))
+    return rows
+
+
+def lookup_code10_from_kakao_address_name(
+    address_name: str,
+    table_path: str = DEFAULT_BJDONG_TXT,
+) -> Optional[str]:
+    """
+    coord2address 의 address_name(예: '부산 해운대구 중동') → 법정동코드 10자리.
+    coord2regioncode 가 B코드를 안 줄 때(해안·신축 등) 보조.
+    """
+    addr = _norm_space(address_name)
+    if len(addr) < 4:
+        return None
+    dong_full = extract_legal_dong_from_address(addr)
+    if not dong_full:
+        return None
+    parts = addr.split()
+    gu_tokens = [p for p in parts if len(p) >= 2 and p.endswith(("구", "군"))]
+    si_tokens = [p for p in parts if len(p) >= 2 and (p.endswith("시") or p.endswith("도"))]
+    rows = _read_legaldong_rows(table_path)
+    candidates: List[Tuple[int, str]] = []
+    for code10, name, status in rows:
+        if status != "존재":
+            continue
+        if dong_full not in name:
+            continue
+        if gu_tokens:
+            if not any(g in name for g in gu_tokens):
+                continue
+        elif si_tokens:
+            if not any(s in name for s in si_tokens):
+                continue
+        else:
+            sig_parts = [p for p in parts if len(p) >= 2 and p != dong_full]
+            if not sig_parts or not any(p in name for p in sig_parts):
+                continue
+        candidates.append((len(name), code10))
+    if not candidates:
+        for code10, name, status in rows:
+            if status != "존재":
+                continue
+            if name in addr or addr in name:
+                candidates.append((len(name), code10))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: -x[0])
+    return candidates[0][1]
 
 
 @lru_cache(maxsize=1)

@@ -1,5 +1,8 @@
 # fly.toml app configuration file generated for bluedot-backend-autumn-grass-4638 on 2026-03-30T00:30:37+09:00
 #
+# 배포: `powershell -File scripts/fly-deploy.ps1` 또는 `fly deploy --remote-only`
+# CI: GitHub Secrets 에 FLY_API_TOKEN → main 푸시 시 .github/workflows/fly-deploy.yml
+#
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 # SQLite 영구 저장: Volume 이름 bluedot_data 를 먼저 만든 뒤 배포하세요.
@@ -7,6 +10,7 @@
 #   fly scale count 1
 #   fly deploy
 # (Volume은 Machine 1대에만 붙습니다. SQLite는 replica 1 권장.)
+# 운영 체크리스트·SSH 임포트·헬스 확인: docs/FLY_SQLITE_AND_DATA.md
 
 app = 'bluedot-backend-autumn-grass-4638'
 primary_region = 'nrt'
@@ -17,6 +21,8 @@ primary_region = 'nrt'
 [env]
   BLUEDOT_TEST_MODE = '0'
   BLUEDOT_DB_PATH = '/data/bluedot.db'
+  # SNS CSV 자동적재: 볼륨 DB에 sns 행이 0일 때만 기동 시 1회(수 분). 이미 채워져 있으면 스킵.
+  BLUEDOT_AUTOIMPORT_SNS = '1'
 
 [[mounts]]
   source = 'bluedot_data'
@@ -29,6 +35,14 @@ primary_region = 'nrt'
   auto_start_machines = true
   min_machines_running = 1
   processes = ['app']
+
+  # 첫 기동·SNS 대용량 CSV 자동적재 시 수 분 걸릴 수 있음 (헬스체크가 503으로 떨어지지 않게)
+  [[http_service.checks]]
+    interval = "20s"
+    timeout = "5s"
+    grace_period = "300s"
+    method = "GET"
+    path = "/api/health"
 
 [[vm]]
   memory = '1gb'
