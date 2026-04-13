@@ -311,7 +311,8 @@ def _unique_sigungu_tuple_from_partial_label(label: str) -> Optional[Tuple[str, 
         s2 = _norm_sigungu_key(str(rec.get("signgu_nm") or ""))
         if not s2:
             continue
-        if nk == s2 or nk in s2 or s2 in nk:
+        # 부분 문자열 금지: "남구" in "강남구" 오탐 방지
+        if nk == s2:
             hits.append(rec)
     if len(hits) != 1:
         return None
@@ -370,11 +371,6 @@ def lookup_vitality_for_coordinates(
     cpk = _norm_sigungu_key(sido)
     sgk = _norm_sigungu_key(sigungu)
     hit = _BY_SIGUNGU.get((cpk, sgk))
-    if not hit:
-        for (a, b), rec in _BY_SIGUNGU.items():
-            if sgk and (sgk in b or b in sgk):
-                hit = rec
-                break
     if not hit:
         return None, {
             "kakao_sido": sido,
